@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 import { loadConfig } from "./config/env.js";
 import { createLogger } from "./lib/logger.js";
 import { modules } from "./modules/index.js";
-import { createRoomServer } from "./server.js";
+import { createAbcWordsServer } from "./project/server.js";
 
 dotenv.config({ quiet: true });
 
@@ -13,7 +13,7 @@ if (config.auth.mode === "guest" && !process.env.SESSION_SECRET) {
   logger.warn("SESSION_SECRET belum diisi, memakai secret development. JANGAN dipakai di production.");
 }
 
-const server = createRoomServer({ config, modules, logger });
+const server = createAbcWordsServer(config, logger);
 
 const port = await server.start();
 logger.info({ port, env: config.env, auth: config.auth.mode, modules: modules.map((m) => m.type) }, "server ready");

@@ -204,4 +204,10 @@ export interface ServerToClientEvents {
 
   /** Event custom dari module, mis. { event: "chat:message", data: {...} }. */
   "room:event": (event: { roomId: string; event: string; data: unknown }) => void;
+
+  /**
+   * (ABC Words) Ke semua koneksi: daftar room di lobby berubah. Tanpa payload;
+   * client cukup mengambil ulang `GET /api/rooms`. Lihat src/project/lobby-store.ts.
+   */
+  "rooms:changed": () => void;
 }
