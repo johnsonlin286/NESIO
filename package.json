@@ -1,0 +1,51 @@
+{
+  "name": "socket-room-boilerplate",
+  "version": "1.0.0",
+  "description": "Reusable Node.js + Express + Socket.IO room server boilerplate",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "nodemon",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnsonlin286/NESIO.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/johnsonlin286/NESIO/issues"
+  },
+  "homepage": "https://github.com/johnsonlin286/NESIO#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.3",
+    "helmet": "^8.3.0",
+    "jose": "^6.2.15",
+    "pino": "^10.4.0",
+    "socket.io": "^4.8.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "nodemon": "^3.1.14",
+    "pino-pretty": "^13.2.0",
+    "socket.io-client": "^4.8.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=20.11"
+  }
+}
