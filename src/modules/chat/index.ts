@@ -29,10 +29,13 @@ const settingsSchema = z.object({
 });
 export type ChatSettings = z.infer<typeof settingsSchema>;
 
-type Ctx = ModuleContext<ChatState, ChatSettings>;
 const action = createActionFactory<ChatState, ChatSettings>();
 
-function pushMessage(ctx: Ctx, message: Omit<ChatMessage, "id" | "at">): ChatMessage {
+/** Juga dipakai module lain yang punya chat di dalam room-nya. */
+export function pushMessage<TState extends ChatState, TSettings extends ChatSettings>(
+  ctx: ModuleContext<TState, TSettings>,
+  message: Omit<ChatMessage, "id" | "at">,
+): ChatMessage {
   const full: ChatMessage = { id: randomUUID(), at: ctx.now(), ...message };
   const { messages } = ctx.room.state;
   messages.push(full);
@@ -40,6 +43,10 @@ function pushMessage(ctx: Ctx, message: Omit<ChatMessage, "id" | "at">): ChatMes
   if (messages.length > limit) messages.splice(0, messages.length - limit);
   return full;
 }
+
+export const chatSendSchema = z.object({
+  text: z.string().transform(cleanText).pipe(z.string().min(1).max(500)),
+});
 
 export const chatModule = defineRoomModule<ChatState, ChatSettings>({
   type: "chat",
@@ -59,9 +66,7 @@ export const chatModule = defineRoomModule<ChatState, ChatSettings>({
 
   actions: {
     send: action({
-      schema: z.object({
-        text: z.string().transform(cleanText).pipe(z.string().min(1).max(500)),
-      }),
+      schema: chatSendSchema,
       // Pesan dikirim lewat event; tidak perlu broadcast seluruh room:state setiap pesan.
       sync: false,
       handler(ctx, { text }) {
