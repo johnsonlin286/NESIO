@@ -20,8 +20,11 @@ export const ROOM_TYPE = "abc-words";
 export const MAX_ROUNDS = 10;
 export const MAX_PLAYERS = 8;
 export const MIN_PLAYERS = 2;
-/** Jatah menolak jawaban per pemain per permainan. */
+/** Jatah menolak jawaban per pemain per permainan. Tolakan yang terbukti benar dikembalikan. */
 export const MAX_REJECTIONS = 3;
+/** Alasan wajib saat menolak jawaban; ditampilkan ke semua pemain. */
+export const REJECT_REASONS = ["off-category", "misspelled", "not-a-word"] as const;
+export type RejectReason = (typeof REJECT_REASONS)[number];
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 const settingsSchema = z.object({
@@ -57,10 +60,12 @@ export interface Answer {
   /** Bentuk ternormalisasi untuk membandingkan jawaban; tidak dikirim ke client. */
   key: string;
   at: number;
-  /** Suara terbuka: siapa saja yang menolak jawaban ini. */
-  rejectedBy: { userId: string; name: string }[];
+  /** Suara terbuka: siapa saja yang menolak jawaban ini, dan alasannya. */
+  rejectedBy: { userId: string; name: string; reason: RejectReason }[];
   /** Hasil voting; `null` sampai fase voting selesai. */
   accepted: boolean | null;
+  /** Perubahan skor dari jawaban ini: +1 lolos, -1 gugur (0 kalau skor sudah 0). `null` sebelum hasil. */
+  points: number | null;
 }
 
 export type AnswerResult = { status: "accepted" | "duplicate" | "near-tie" };
@@ -214,7 +219,11 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
     setDeadline(ctx, timing.votingMs);
   }
 
-  /** Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya. */
+  /**
+   * Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya.
+   * Lolos +1, gugur -1 (skor tidak turun di bawah 0) supaya asal menjawab tidak menguntungkan.
+   * Penolak jawaban yang gugur mendapat jatah tolaknya kembali; penolak jawaban yang lolos tidak.
+   */
   function showResult(ctx: Ctx): void {
     const { state, members } = ctx.room;
     const online = members.filter((m) => m.isConnected).map((m) => m.userId);
@@ -223,7 +232,17 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
       const voters = online.filter((id) => id !== answer.userId);
       const rejections = answer.rejectedBy.filter((r) => voters.includes(r.userId)).length;
       answer.accepted = rejections * 2 <= voters.length;
-      if (answer.accepted) state.scores[answer.userId] = (state.scores[answer.userId] ?? 0) + 1;
+
+      const before = state.scores[answer.userId] ?? 0;
+      const after = answer.accepted ? before + 1 : Math.max(before - 1, 0);
+      answer.points = after - before;
+      state.scores[answer.userId] = after;
+
+      if (!answer.accepted) {
+        for (const { userId } of answer.rejectedBy) {
+          state.rejectionsUsed[userId] = Math.max((state.rejectionsUsed[userId] ?? 0) - 1, 0);
+        }
+      }
     }
 
     state.phase = "result";
@@ -429,16 +448,24 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
             at: now,
             rejectedBy: [],
             accepted: null,
+            points: null,
           });
           checkAnswering(ctx);
           return { status: "accepted" };
         },
       }),
 
-      /** Menolak jawaban pemain lain, atau membatalkannya (jatahnya kembali). */
+      /**
+       * Menolak jawaban pemain lain dengan alasan, atau membatalkannya (jatahnya kembali).
+       * Menolak lagi dengan alasan lain hanya mengganti alasannya.
+       */
       reject: action({
-        schema: z.object({ answerUserId: z.string().min(1).max(128), rejected: z.boolean() }),
-        handler(ctx, { answerUserId, rejected }) {
+        schema: z.discriminatedUnion("rejected", [
+          z.object({ answerUserId: z.string().min(1).max(128), rejected: z.literal(true), reason: z.enum(REJECT_REASONS) }),
+          z.object({ answerUserId: z.string().min(1).max(128), rejected: z.literal(false) }),
+        ]),
+        handler(ctx, payload) {
+          const { answerUserId } = payload;
           const { state } = ctx.room;
           const sender = ctx.sender!;
 
@@ -448,14 +475,17 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
           if (!answer) return ctx.fail("ANSWER_NOT_FOUND", "Jawaban tidak ditemukan");
 
           const index = answer.rejectedBy.findIndex((r) => r.userId === sender.userId);
-          if (rejected === index >= 0) return; // sudah sesuai permintaan
-
           const used = state.rejectionsUsed[sender.userId] ?? 0;
-          if (rejected) {
+          if (payload.rejected) {
+            const mine = answer.rejectedBy[index];
+            if (mine) {
+              mine.reason = payload.reason;
+              return;
+            }
             if (used >= MAX_REJECTIONS) ctx.fail("NO_REJECTIONS_LEFT", "Jatah tolak kamu sudah habis");
-            answer.rejectedBy.push({ userId: sender.userId, name: sender.name });
+            answer.rejectedBy.push({ userId: sender.userId, name: sender.name, reason: payload.reason });
             state.rejectionsUsed[sender.userId] = used + 1;
-          } else {
+          } else if (index >= 0) {
             answer.rejectedBy.splice(index, 1);
             state.rejectionsUsed[sender.userId] = used - 1;
           }

@@ -722,8 +722,11 @@ describe("abc-words: menjawab", () => {
 describe("abc-words: voting dan skor", () => {
   type Socket = Parameters<typeof ok>[0];
   const answer = (socket: Socket, text: string) => ok(socket, "room:action", { action: "answer", payload: { text } });
-  const reject = (socket: Socket, target: Socket, rejected = true) =>
-    call(socket, "room:action", { action: "reject", payload: { answerUserId: idOf(target), rejected } });
+  const reject = (socket: Socket, target: Socket, rejected = true, reason: string = "off-category") =>
+    call(socket, "room:action", {
+      action: "reject",
+      payload: { answerUserId: idOf(target), rejected, ...(rejected && { reason }) },
+    });
   const idOf = (socket: Socket) => (socket as unknown as { session: { userId: string } }).session.userId;
   const state = async (socket: Socket) => (await ok<GameRoom>(socket, "room:sync")).state;
   const tick = async (socket: Socket) => {
@@ -785,7 +788,9 @@ describe("abc-words: voting dan skor", () => {
     expect(await verdict(p0, p0)).toBe(false);
     expect(await verdict(p0, p1)).toBe(true);
     expect(await verdict(p0, p2)).toBe(true);
-    expect(now.scores).toEqual({ [idOf(p1)]: 1, [idOf(p2)]: 1 });
+    // Skor 0 tidak turun lagi saat gugur.
+    expect(now.scores).toEqual({ [idOf(p0)]: 0, [idOf(p1)]: 1, [idOf(p2)]: 1 });
+    expect(now.answers.map((a) => a.points)).toEqual([0, 1, 1]);
   });
 
   it("game 2 pemain: satu penolakan menggugurkan kata", async () => {
@@ -811,9 +816,9 @@ describe("abc-words: voting dan skor", () => {
   it("suara terbuka: nama penolak terlihat semua pemain, tanpa data internal", async () => {
     const { sockets } = await voting(["aa", "bb", "cc"]);
     const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
-    await reject(p1, p0);
+    await reject(p1, p0, true, "misspelled");
     const seen = (await state(p2)).answers.find((a) => a.userId === idOf(p0))!;
-    expect(seen.rejectedBy).toEqual([{ userId: idOf(p1), name: "Pemain1" }]);
+    expect(seen.rejectedBy).toEqual([{ userId: idOf(p1), name: "Pemain1", reason: "misspelled" }]);
     expect(await state(p2)).not.toHaveProperty("rejectionsUsed");
   });
 
@@ -848,17 +853,58 @@ describe("abc-words: voting dan skor", () => {
     expect(await reject(p0, p4)).toMatchObject({ ok: true });
   });
 
-  it("jatah tolak terbawa ke ronde berikutnya, dan skor bertambah", async () => {
-    const { sockets } = await voting(["aa", "bb"], { maxRounds: 2 });
+  it("menolak wajib dengan alasan yang dikenal", async () => {
+    const { sockets } = await voting(["aa", "bb"]);
     const [p0, p1] = sockets as [Socket, Socket];
-    await reject(p1, p0);
-    await tick(p0); // hasil
-    await tick(p0); // ronde 2
-    expect((await state(p1)).rejectionsLeft).toBe(2);
+    const bare = await call(p1, "room:action", { action: "reject", payload: { answerUserId: idOf(p0), rejected: true } });
+    expect(bare).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
+    expect(await reject(p1, p0, true, "jelek")).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
+    expect((await state(p1)).rejectionsLeft).toBe(3);
+  });
 
-    await playRound(sockets, ["aa", "bb"]);
+  it("mengganti alasan tidak memakai jatah lagi", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    await reject(p1, p0, true, "off-category");
+    await reject(p1, p0, true, "not-a-word");
+    const seen = (await state(p2)).answers.find((a) => a.userId === idOf(p0))!;
+    expect(seen.rejectedBy).toEqual([{ userId: idOf(p1), name: "Pemain1", reason: "not-a-word" }]);
+    expect((await state(p1)).rejectionsLeft).toBe(2);
+  });
+
+  it("tolakan yang benar dikembalikan; tolakan yang kalah tetap terpakai", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 2 });
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    await reject(p1, p0);
+    await reject(p2, p0); // p0 gugur: jatah p1 dan p2 kembali
+    await reject(p0, p1); // p1 tetap lolos: jatah p0 hangus
+    expect((await state(p1)).rejectionsLeft).toBe(2);
     await tick(p0); // hasil
-    expect((await state(p0)).scores).toEqual({ [idOf(p0)]: 1, [idOf(p1)]: 2 });
+    expect((await state(p0)).rejectionsLeft).toBe(2);
+    expect((await state(p1)).rejectionsLeft).toBe(3);
+    expect((await state(p2)).rejectionsLeft).toBe(3);
+
+    await tick(p0); // ronde 2: jatah terbawa
+    expect((await state(p0)).rejectionsLeft).toBe(2);
+  });
+
+  it("jawaban gugur mengurangi 1 poin, tidak sampai di bawah 0", async () => {
+    const { sockets } = await voting(["aa", "bb"], { maxRounds: 3 });
+    const [p0, p1] = sockets as [Socket, Socket];
+    await tick(p0); // ronde 1: dua-duanya lolos
+    await tick(p0);
+    expect((await state(p0)).scores).toEqual({ [idOf(p0)]: 1, [idOf(p1)]: 1 });
+
+    // Ronde 2: 1 -> 0 (poin -1). Ronde 3: sudah 0, tetap 0 (poin 0).
+    for (const points of [-1, 0]) {
+      await playRound(sockets, ["aa", "bb"]);
+      await reject(p1, p0);
+      await tick(p0); // hasil
+      const now = await state(p0);
+      expect(now.scores[idOf(p0)]).toBe(0);
+      expect(now.answers.find((a) => a.userId === idOf(p0))!.points).toBe(points);
+      await tick(p0);
+    }
   });
 
   it("pemilih yang putus tidak dihitung", async () => {
