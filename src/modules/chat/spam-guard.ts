@@ -1,6 +1,7 @@
 /**
- * Anti-spam untuk chat room: pemain yang mengirim terlalu banyak pesan, atau pesan yang sama
- * berulang-ulang, mendapat peringatan; pelanggaran berikutnya membuatnya dibisukan sementara.
+ * Penjaga chat room: pesan spam (terlalu banyak, atau sama berulang-ulang) dan pesan berisi kata
+ * kasar ditolak dan tidak ditampilkan. Keduanya dihitung sebagai pelanggaran yang sama;
+ * pelanggaran berikutnya membuat pemain dibisukan sementara.
  * Hanya pemain itu yang diberi tahu, supaya tidak mempermalukan atau memancing drama.
  *
  * Catatan disimpan di luar state room (dalam memori proses), karena pesan yang ditolak dikirim
@@ -31,12 +32,18 @@ export const DEFAULT_CHAT_SPAM_RULES: ChatSpamRules = {
 };
 
 export const CHAT_SLOW_DOWN = "CHAT_SLOW_DOWN";
+export const CHAT_PROFANITY = "CHAT_PROFANITY";
 export const CHAT_MUTED = "CHAT_MUTED";
 
 export type ChatSpamVerdict =
   | { ok: true }
   /** `retryAfterMs` ada kalau pemain sedang (atau baru saja) dibisukan. */
-  | { ok: false; code: typeof CHAT_SLOW_DOWN | typeof CHAT_MUTED; message: string; retryAfterMs?: number };
+  | {
+      ok: false;
+      code: typeof CHAT_SLOW_DOWN | typeof CHAT_PROFANITY | typeof CHAT_MUTED;
+      message: string;
+      retryAfterMs?: number;
+    };
 
 interface SenderRecord {
   /** Waktu pesan yang berhasil terkirim, untuk hitungan banjir pesan. */
@@ -54,7 +61,13 @@ function minutesText(ms: number): string {
   return minutes <= 1 ? "1 menit" : `${minutes} menit`;
 }
 
-export function createChatSpamGuard(rules: ChatSpamRules = DEFAULT_CHAT_SPAM_RULES) {
+/**
+ * @param isProfane pemeriksa kata kasar (lihat `./profanity.ts`); tanpa ini, hanya spam yang dicek.
+ */
+export function createChatSpamGuard(
+  rules: ChatSpamRules = DEFAULT_CHAT_SPAM_RULES,
+  isProfane: (text: string) => boolean = () => false,
+) {
   /** Kunci: `roomId:userId`. */
   const records = new Map<string, SenderRecord>();
 
@@ -79,7 +92,7 @@ export function createChatSpamGuard(rules: ChatSpamRules = DEFAULT_CHAT_SPAM_RUL
     return {
       ok: false,
       code: CHAT_MUTED,
-      message: `Kamu dibisukan karena spam. Bisa mengirim pesan lagi dalam ${minutesText(retryAfterMs)}.`,
+      message: `Kamu dibisukan karena melanggar aturan chat. Bisa mengirim pesan lagi dalam ${minutesText(retryAfterMs)}.`,
       retryAfterMs,
     };
   }
@@ -101,8 +114,9 @@ export function createChatSpamGuard(rules: ChatSpamRules = DEFAULT_CHAT_SPAM_RUL
       const sameRun =
         normalized === r.lastText && now - r.lastTextAt < rules.repeatWindowMs ? r.lastTextCount + 1 : 1;
       const repeat = sameRun >= rules.repeatLimit;
+      const profane = !flood && !repeat && isProfane(text);
 
-      if (flood || repeat) {
+      if (flood || repeat || profane) {
         r.offenses = r.offenses.filter((at) => now - at < rules.offenseWindowMs);
         r.offenses.push(now);
         if (r.offenses.length >= rules.offensesToMute) {
@@ -110,11 +124,10 @@ export function createChatSpamGuard(rules: ChatSpamRules = DEFAULT_CHAT_SPAM_RUL
           r.mutedUntil = now + rules.muteMs;
           return mutedVerdict(rules.muteMs);
         }
-        return {
-          ok: false,
-          code: CHAT_SLOW_DOWN,
-          message: `Pelan-pelan ya, pesanmu tidak dikirim. Sekali lagi kamu dibisukan ${minutesText(rules.muteMs)}.`,
-        };
+        const warning = `Sekali lagi kamu dibisukan ${minutesText(rules.muteMs)}.`;
+        return profane
+          ? { ok: false, code: CHAT_PROFANITY, message: `Pesanmu tidak dikirim karena mengandung kata kasar. ${warning}` }
+          : { ok: false, code: CHAT_SLOW_DOWN, message: `Pelan-pelan ya, pesanmu tidak dikirim. ${warning}` };
       }
 
       sentAt.push(now);

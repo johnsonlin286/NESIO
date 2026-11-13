@@ -3,6 +3,7 @@ import type { PresenceTracker } from "../core/presence.js";
 import type { RoomService } from "../core/room-service.js";
 import { AppError, Errors } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
+import type { FailedAttemptLimiter } from "../lib/attempt-limiter.js";
 import type { FixedWindowLimiter } from "../lib/rate-limiter.js";
 import { parseOrThrow } from "../lib/validation.js";
 import type { AckResponse, ClientToServerEvents, SessionInfo } from "../shared/contract.js";
@@ -19,6 +20,10 @@ export interface HandlerDeps {
   rooms: RoomService;
   presence: PresenceTracker;
   limiter: FixedWindowLimiter;
+  /** Dibagi semua socket: menebak password room dibatasi per alamat IP dan per room. */
+  passwordAttempts: FailedAttemptLimiter;
+  /** Alamat IP koneksi ini, untuk `passwordAttempts`. */
+  ip: string;
   logger: Logger;
 }
 
@@ -29,7 +34,7 @@ type AnyAck = (response: AckResponse<unknown>) => void;
  * Setiap handler: rate limit -> validasi -> logic -> balas via ack.
  */
 export function registerRoomHandlers(socket: AppSocket, deps: HandlerDeps): void {
-  const { rooms, limiter, logger } = deps;
+  const { rooms, limiter, passwordAttempts, ip, logger } = deps;
   const { identity } = socket.data;
   const userId = identity.userId;
 
@@ -58,7 +63,25 @@ export function registerRoomHandlers(socket: AppSocket, deps: HandlerDeps): void
   on("session:get", null, async (): Promise<SessionInfo> => buildSession(socket, await rooms.findRoomIdByUser(userId)));
 
   on("room:create", createRoomSchema, (input) => rooms.create(identity, input));
-  on("room:join", joinRoomSchema, (input) => rooms.join(identity, input));
+  on("room:join", joinRoomSchema, async (input) => {
+    const key = `${input.roomId.toUpperCase()}:${ip}`;
+    const lockedMs = passwordAttempts.lockedFor(key);
+    if (lockedMs > 0) {
+      throw new AppError(
+        "TOO_MANY_ATTEMPTS",
+        `Terlalu banyak percobaan password salah. Coba lagi dalam ${Math.ceil(lockedMs / 1000)} detik.`,
+        { retryAfterMs: lockedMs },
+      );
+    }
+    try {
+      const view = await rooms.join(identity, input);
+      passwordAttempts.recordSuccess(key);
+      return view;
+    } catch (error) {
+      if (error instanceof AppError && error.code === "INVALID_PASSWORD") passwordAttempts.recordFailure(key);
+      throw error;
+    }
+  });
   on("room:leave", null, () => rooms.leave(userId));
   on("room:sync", null, () => rooms.getViewForUser(userId));
 

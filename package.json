@@ -24,11 +24,13 @@
   },
   "homepage": "https://github.com/johnsonlin286/NESIO#readme",
   "dependencies": {
+    "@2toad/profanity": "^3.3.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.9",
     "express": "^5.3.0",
     "express-rate-limit": "^8.7.3",
     "helmet": "^8.3.0",
+    "indonesian-badwords": "^2.7.0",
     "jose": "^6.2.15",
     "pino": "^10.4.0",
     "socket.io": "^4.8.4",
@@ -46,6 +48,6 @@
     "vitest": "^5.1.0"
   },
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22"
   }
 }

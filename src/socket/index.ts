@@ -5,6 +5,7 @@ import type { PresenceTracker } from "../core/presence.js";
 import type { RoomService } from "../core/room-service.js";
 import { AppError } from "../lib/errors.js";
 import type { Logger } from "../lib/logger.js";
+import { FailedAttemptLimiter } from "../lib/attempt-limiter.js";
 import { FixedWindowLimiter } from "../lib/rate-limiter.js";
 import { buildSession, registerRoomHandlers } from "./handlers.js";
 import { roomChannel, userChannel, type AppServer } from "./types.js";
@@ -20,6 +21,8 @@ export interface SocketLayerDeps {
 
 export function setupSocketLayer({ io, config, rooms, presence, authenticator, logger }: SocketLayerDeps): void {
   const log = logger.child({ component: "socket" });
+  // 5 password salah dalam 1 menit -> room itu terkunci 1 menit untuk alamat IP tersebut.
+  const passwordAttempts = new FailedAttemptLimiter(5, 60_000, 60_000);
 
   // 1. Autentikasi saat handshake. Gagal -> client menerima `connect_error`.
   io.use(async (socket, next) => {
@@ -53,6 +56,8 @@ export function setupSocketLayer({ io, config, rooms, presence, authenticator, l
       rooms,
       presence,
       limiter: new FixedWindowLimiter(config.socket.rateLimit.max, config.socket.rateLimit.windowMs),
+      passwordAttempts,
+      ip: socket.handshake.address,
       logger: socketLog,
     });
 

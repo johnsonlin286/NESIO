@@ -4,6 +4,7 @@ import { createActionFactory, defineRoomModule, type ModuleContext } from "../..
 import type { Room } from "../../core/types.js";
 import { cleanText } from "../../lib/text.js";
 import { chatSendSchema, pushMessage, type ChatState } from "../chat/index.js";
+import { createProfanityChecker } from "../chat/profanity.js";
 import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from "../chat/spam-guard.js";
 
 /**
@@ -294,7 +295,8 @@ export function createAbcWordsModule(
   chatRules: Partial<ChatSpamRules> = {},
 ) {
   const timing: AbcWordsTiming = { ...DEFAULT_TIMING, ...overrides };
-  const chatGuard = createChatSpamGuard({ ...DEFAULT_CHAT_SPAM_RULES, ...chatRules });
+  const profanity = createProfanityChecker();
+  const chatGuard = createChatSpamGuard({ ...DEFAULT_CHAT_SPAM_RULES, ...chatRules }, (text) => profanity.isProfane(text));
 
   /**
    * Jawaban yang ditolak per pemain, untuk jeda menjawab. Disimpan di luar state room karena

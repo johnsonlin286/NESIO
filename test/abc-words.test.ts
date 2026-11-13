@@ -1214,6 +1214,20 @@ describe("abc-words: spam chat", () => {
     await sleep(220);
     expect(await send(a, "maaf")).toMatchObject({ ok: true });
   });
+
+  it("pesan berkata kasar tidak sampai ke pemain lain", async () => {
+    const module = createAbcWordsModule();
+    const { url } = await startServer({}, [module]);
+    const a = await connect(url, { name: "Kasar" });
+    const b = await connect(url, { name: "Sopan" });
+    const room = await ok<GameRoom>(a, "room:create", { type: "abc-words", isPublic: true });
+    await ok(b, "room:join", { roomId: room.id });
+
+    const refused = await call(a, "room:action", { action: "send", payload: { text: "dasar g0bl0k" } });
+    expect(refused).toMatchObject({ ok: false, error: { code: "CHAT_PROFANITY" } });
+    const { state } = await ok<GameRoom>(b, "room:sync");
+    expect(state.messages.some((m) => /g0bl0k/i.test(m.text))).toBe(false);
+  });
 });
 
 describe("abc-words: AFK", () => {
