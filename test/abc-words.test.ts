@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config/env.js";
 import {
+  AFK_ROUNDS,
   createAbcWordsModule,
   drawLetter,
   type AbcWordsSettings,
@@ -608,6 +609,53 @@ describe("abc-words: menjawab", () => {
     expect(await state(b)).not.toHaveProperty("graceUsedBy");
   });
 
+  it("3 jawaban ditolak dalam waktu singkat: jeda sebelum boleh menjawab lagi", async () => {
+    const { a, b, c } = await answering(3, [1, 1, 1], { nearTieMs: 0, retryWindowMs: 5000, retryCooldownMs: 150 }); // C
+    expect(await answer(a, "Cicak")).toMatchObject({ ok: true, data: { status: "accepted" } });
+
+    const first = await answer(b, "Cicak");
+    expect(first).toMatchObject({ ok: true, data: { status: "duplicate" } });
+    expect((first as { data: object }).data).not.toHaveProperty("retryAfterMs");
+    expect(await answer(b, "Domba")).toMatchObject({ ok: false, error: { code: "WRONG_LETTER" } });
+    // Penolakan ke-3 langsung memberi tahu jedanya.
+    expect(await answer(b, "C")).toMatchObject({
+      ok: false,
+      error: { code: "INVALID_ANSWER", details: { retryAfterMs: 150 } },
+    });
+
+    const blocked = await answer(b, "Cumi");
+    expect(blocked).toMatchObject({ ok: false, error: { code: "SLOW_DOWN" } });
+    const retryAfterMs = (blocked as { error: { details: { retryAfterMs: number } } }).error.details.retryAfterMs;
+    expect(retryAfterMs).toBeGreaterThan(0);
+    expect(retryAfterMs).toBeLessThanOrEqual(150);
+
+    // Pemain lain tidak terpengaruh.
+    expect(await answer(c, "Capung")).toMatchObject({ ok: true, data: { status: "accepted" } });
+
+    await sleep(170);
+    expect(await answer(b, "Cumi")).toMatchObject({ ok: true, data: { status: "accepted" } });
+  });
+
+  it("keduluan tidak dihitung sebagai percobaan ditolak", async () => {
+    const { a, b } = await answering(3, [1, 1, 1], { nearTieMs: 5000, retryWindowMs: 5000, retryCooldownMs: 5000 });
+    await answer(a, "Cicak");
+    expect(await answer(b, "Cicak")).toMatchObject({ ok: true, data: { status: "near-tie" } });
+    expect(await answer(b, "Cicak")).toMatchObject({ ok: true, data: { status: "duplicate" } });
+    expect(await answer(b, "Cicak")).toMatchObject({ ok: true, data: { status: "duplicate" } });
+    expect(await answer(b, "Cumi")).toMatchObject({ ok: true, data: { status: "accepted" } }); // baru 2 yang dihitung
+  });
+
+  it("penolakan yang berjarak tidak memicu jeda", async () => {
+    const { a, b } = await answering(3, [1, 1, 1], { nearTieMs: 0, retryWindowMs: 60, retryCooldownMs: 5000 }); // C
+    await answer(a, "Cicak");
+    // Keduluan (sial, bukan menebak) juga tidak dihitung; di sini dimatikan lewat nearTieMs: 0.
+    for (let i = 0; i < 3; i++) {
+      expect(await answer(b, "Cicak")).toMatchObject({ ok: true, data: { status: "duplicate" } });
+      await sleep(80);
+    }
+    expect(await answer(b, "Cumi")).toMatchObject({ ok: true, data: { status: "accepted" } });
+  });
+
   it("boleh lebih dari satu kata dan huruf beraksen", async () => {
     const { a, b } = await answering(3, [9, 9, 1]); // S
     expect(await answer(a, "Seventeen Again")).toMatchObject({ ok: true });
@@ -639,7 +687,7 @@ describe("abc-words: menjawab", () => {
   });
 
   it("jawaban sama ditolak tanpa membedakan huruf besar, aksen, dan spasi; boleh coba lagi", async () => {
-    const { a, b, c } = await answering(3, [1, 1, 1], { nearTieMs: 0 });
+    const { a, b, c } = await answering(3, [1, 1, 1], { nearTieMs: 0, retryCooldownMs: 0 });
     await answer(a, "Cicak Hijau");
 
     for (const text of ["cicak hijau", "  CICAK   HIJAU ", "Cícak Hijau"]) {
@@ -827,14 +875,124 @@ describe("abc-words: voting dan skor", () => {
     expect(await reject(sockets[0]!, sockets[0]!)).toMatchObject({ ok: false, error: { code: "OWN_ANSWER" } });
   });
 
-  it("pemain yang tidak menjawab tetap boleh menolak, dan tidak dapat poin", async () => {
+  it("pemain yang tidak menjawab tetap boleh menolak", async () => {
     const { sockets } = await voting(["aa", "bb", ""]);
-    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    const [p0, p2] = [sockets[0]!, sockets[2]!];
     expect(await reject(p2, p0)).toMatchObject({ ok: true });
     expect(await reject(p0, p2)).toMatchObject({ ok: false, error: { code: "ANSWER_NOT_FOUND" } });
+  });
+
+  it("tidak menjawab -1, tidak sampai di bawah 0", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 3 });
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    await tick(p0); // ronde 1: semua +1
     await tick(p0);
-    expect((await state(p0)).scores[idOf(p2)]).toBeUndefined();
-    expect((await state(p0)).scores[idOf(p1)]).toBe(1);
+
+    await playRound(sockets, ["aa", "bb", ""]);
+    await tick(p0); // hasil ronde 2
+    let now = await state(p0);
+    expect(now.scores).toEqual({ [idOf(p0)]: 2, [idOf(p1)]: 2, [idOf(p2)]: 0 });
+    expect(now.penalties).toEqual([
+      { userId: idOf(p2), name: "Pemain2", reason: "no-answer", answerText: null, strike: null, warning: false, points: -1 },
+    ]);
+    await tick(p0);
+
+    await playRound(sockets, ["aa", "bb", ""]);
+    await tick(p0); // hasil ronde 3: sudah 0
+    now = await state(p0);
+    expect(now.scores[idOf(p2)]).toBe(0);
+    expect(now.penalties[0]!.points).toBe(0);
+  });
+
+  it("tidak ada yang menjawab: semua -1", async () => {
+    const { sockets } = await voting(["aa", "bb"], { maxRounds: 2 });
+    const [p0, p1] = sockets as [Socket, Socket];
+    await tick(p0);
+    await tick(p0);
+    await playRound(sockets, ["", ""]);
+    const now = await state(p0);
+    expect(now.phase).toBe("result");
+    expect(now.scores).toEqual({ [idOf(p0)]: 0, [idOf(p1)]: 0 });
+    expect(now.penalties.map((p) => p.reason)).toEqual(["no-answer", "no-answer"]);
+  });
+
+  it("menolak sendirian: pertama diam, kedua peringatan, ketiga kali -1", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 4 });
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    const loneOf = async () => (await state(p0)).penalties.filter((p) => p.reason === "lone-rejection");
+
+    // Ronde 1-2: p1 menolak p0 sendirian, p0 tetap lolos.
+    // Pertama: diam-diam. Kedua: peringatan tanpa potongan.
+    for (const strike of [1, 2]) {
+      if (strike > 1) await playRound(sockets, ["aa", "bb", "cc"]);
+      await reject(p1, p0);
+      await tick(p0); // hasil
+      expect(await verdict(p0, p0)).toBe(true);
+      expect(await loneOf()).toEqual(
+        strike === 1
+          ? []
+          : [
+              {
+                userId: idOf(p1),
+                name: "Pemain1",
+                reason: "lone-rejection",
+                answerText: expect.any(String),
+                strike,
+                warning: true,
+                points: 0,
+              },
+            ],
+      );
+      expect((await state(p2)).loneRejections).toEqual({ [idOf(p1)]: strike });
+      await tick(p0);
+    }
+    expect((await state(p0)).scores[idOf(p1)]).toBe(2);
+
+    // Ronde 3: ketiga kali, -1.
+    await playRound(sockets, ["aa", "bb", "cc"]);
+    await reject(p1, p0);
+    await tick(p0);
+    expect(await loneOf()).toMatchObject([{ userId: idOf(p1), strike: 3, warning: false, points: -1 }]);
+    expect((await state(p0)).scores[idOf(p1)]).toBe(2); // 2 + 1 - 1
+    await tick(p0);
+
+    // Tolakan yang didukung pemain lain tidak dihitung sebagai tolakan sendirian.
+    // (Jatah tolak p1 sudah habis: tolakan sendirian tidak dikembalikan.)
+    await playRound(sockets, ["aa", "bb", "cc"]);
+    await reject(p0, p1);
+    await reject(p2, p1);
+    await tick(p0);
+    expect(await loneOf()).toEqual([]);
+    expect((await state(p0)).loneRejections[idOf(p1)]).toBe(3);
+  });
+
+  it("permainan baru: hitungan tolakan sendirian kembali 0", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 1 });
+    const [p0, p1] = sockets as [Socket, Socket];
+    await reject(p1, p0);
+    await tick(p0); // hasil
+    await tick(p0); // skor akhir
+    await tick(p0); // ruang tunggu
+    expect((await state(p0)).loneRejections).toEqual({});
+  });
+
+  it("menolak sendirian tapi kalah suara bersama pemain lain: tidak ada hukuman", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc", "dd", "ee"]);
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    await reject(p1, p0);
+    await reject(p2, p0); // 2 dari 4: seri, lolos, tapi p1 tidak sendirian
+    await tick(p0);
+    expect(await verdict(p0, p0)).toBe(true);
+    expect((await state(p0)).penalties).toEqual([]);
+  });
+
+  it("game 2 pemain: tolakan sendirian tidak dihukum (jawaban pasti gugur)", async () => {
+    const { sockets } = await voting(["aa", "bb"]);
+    const [p0, p1] = sockets as [Socket, Socket];
+    await reject(p1, p0);
+    await tick(p0);
+    expect(await verdict(p0, p0)).toBe(false);
+    expect((await state(p0)).penalties).toEqual([]);
   });
 
   it("jatah tolak 3 per permainan; membatalkan mengembalikan jatah", async () => {
@@ -859,7 +1017,7 @@ describe("abc-words: voting dan skor", () => {
     const bare = await call(p1, "room:action", { action: "reject", payload: { answerUserId: idOf(p0), rejected: true } });
     expect(bare).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
     expect(await reject(p1, p0, true, "jelek")).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
-    expect((await state(p1)).rejectionsLeft).toBe(3);
+    expect((await state(p1)).rejectionsLeft).toBe(1);
   });
 
   it("mengganti alasan tidak memakai jatah lagi", async () => {
@@ -888,23 +1046,87 @@ describe("abc-words: voting dan skor", () => {
     expect((await state(p0)).rejectionsLeft).toBe(2);
   });
 
-  it("jawaban gugur mengurangi 1 poin, tidak sampai di bawah 0", async () => {
-    const { sockets } = await voting(["aa", "bb"], { maxRounds: 3 });
-    const [p0, p1] = sockets as [Socket, Socket];
-    await tick(p0); // ronde 1: dua-duanya lolos
+  it("jawaban gugur mengurangi 2 poin, tidak sampai di bawah 0", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 4 });
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    await tick(p0); // ronde 1: semua lolos
     await tick(p0);
-    expect((await state(p0)).scores).toEqual({ [idOf(p0)]: 1, [idOf(p1)]: 1 });
+    await playRound(sockets, ["aa", "bb", "cc"]);
+    await tick(p0); // ronde 2: semua lolos
+    await tick(p0);
+    expect((await state(p0)).scores).toEqual({ [idOf(p0)]: 2, [idOf(p1)]: 2, [idOf(p2)]: 2 });
 
-    // Ronde 2: 1 -> 0 (poin -1). Ronde 3: sudah 0, tetap 0 (poin 0).
-    for (const points of [-1, 0]) {
-      await playRound(sockets, ["aa", "bb"]);
+    // Ronde 3: 2 -> 0 (poin -2). Ronde 4: sudah 0, tetap 0 (poin 0).
+    for (const points of [-2, 0]) {
+      await playRound(sockets, ["aa", "bb", "cc"]);
       await reject(p1, p0);
+      await reject(p2, p0);
       await tick(p0); // hasil
       const now = await state(p0);
       expect(now.scores[idOf(p0)]).toBe(0);
       expect(now.answers.find((a) => a.userId === idOf(p0))!.points).toBe(points);
       await tick(p0);
     }
+  });
+
+  it("game 2 pemain: jatah tolak 1, dan tolakan sepihak tidak dikembalikan", async () => {
+    const { sockets } = await voting(["aa", "bb"], { maxRounds: 2 });
+    const [p0, p1] = sockets as [Socket, Socket];
+    expect((await state(p1)).rejectionsLeft).toBe(1);
+    await reject(p1, p0);
+    await tick(p0); // hasil: gugur, tapi jatah tidak kembali
+    expect(await verdict(p0, p0)).toBe(false);
+    expect((await state(p1)).rejectionsLeft).toBe(0);
+
+    await tick(p0);
+    await playRound(sockets, ["aa", "bb"]);
+    expect(await reject(p1, p0)).toMatchObject({ ok: false, error: { code: "NO_REJECTIONS_LEFT" } });
+  });
+
+  it("game 3 pemain atau lebih: jatah tolak 3", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    expect((await state(sockets[0]!)).rejectionsLeft).toBe(3);
+  });
+
+  it("voting selesai lebih awal saat semua penilai selesai; bisa dibatalkan", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    const done = (s: Socket, value = true) => call(s, "room:action", { action: "doneVoting", payload: { done: value } });
+    await reject(p1, p0);
+    await reject(p2, p0);
+    expect(await done(p0)).toMatchObject({ ok: true });
+    expect(await done(p1)).toMatchObject({ ok: true });
+    expect(await done(p1, false)).toMatchObject({ ok: true });
+    expect(await done(p2)).toMatchObject({ ok: true });
+    const mid = await state(p0);
+    expect(mid.phase).toBe("voting");
+    expect(mid.votingDone.sort()).toEqual([idOf(p0), idOf(p2)].sort());
+
+    await done(p1); // tanpa tick
+    const now = await state(p0);
+    expect(now.phase).toBe("result");
+    expect(await verdict(p0, p0)).toBe(false);
+    expect(await done(p0)).toMatchObject({ ok: false, error: { code: "WRONG_PHASE" } });
+  });
+
+  it("pemain yang tidak punya jawaban untuk dinilai tidak ditunggu", async () => {
+    const { sockets } = await voting(["aa", ""]);
+    const [p0, p1] = sockets as [Socket, Socket];
+    const done = (s: Socket) => call(s, "room:action", { action: "doneVoting", payload: { done: true } });
+    expect(await done(p0)).toMatchObject({ ok: false, error: { code: "NOTHING_TO_JUDGE" } });
+    await done(p1);
+    expect((await state(p0)).phase).toBe("result");
+  });
+
+  it("penilai yang putus tidak ditunggu", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    const done = (s: Socket) => call(s, "room:action", { action: "doneVoting", payload: { done: true } });
+    await done(p0);
+    await done(p1);
+    (p2 as unknown as { disconnect(): void }).disconnect();
+    await sleep(30);
+    expect((await state(p0)).phase).toBe("result");
   });
 
   it("pemilih yang putus tidak dihitung", async () => {
@@ -961,5 +1183,151 @@ describe("abc-words: voting dan skor", () => {
     (p1 as unknown as { disconnect(): void }).disconnect();
     await sleep(30);
     expect((await state(p0)).phase).toBe("finished");
+  });
+});
+
+describe("abc-words: spam chat", () => {
+  it("pesan spam ditolak; pelanggaran ke-2 membisukan hanya pemain itu", async () => {
+    const module = createAbcWordsModule({}, { muteMs: 200 });
+    const { url } = await startServer({}, [module]);
+    const a = await connect(url, { name: "Spammer" });
+    const b = await connect(url, { name: "Sopan" });
+    const room = await ok<GameRoom>(a, "room:create", { type: "abc-words", isPublic: true });
+    await ok(b, "room:join", { roomId: room.id });
+    const send = (socket: typeof a, text: string) => call(socket, "room:action", { action: "send", payload: { text } });
+
+    await send(a, "spam");
+    await send(a, "spam");
+    expect(await send(a, "spam")).toMatchObject({ ok: false, error: { code: "CHAT_SLOW_DOWN" } });
+    expect(await send(a, "spam")).toMatchObject({
+      ok: false,
+      error: { code: "CHAT_MUTED", details: { retryAfterMs: 200 } },
+    });
+    expect(await send(a, "maaf")).toMatchObject({ ok: false, error: { code: "CHAT_MUTED" } });
+    expect(await send(b, "halo")).toMatchObject({ ok: true });
+
+    // Tidak ada pengumuman ke room; pesan spam tidak tersimpan.
+    const { state } = await ok<GameRoom>(b, "room:sync");
+    expect(state.messages.filter((m) => m.userId !== null).map((m) => m.text)).toEqual(["spam", "spam", "halo"]);
+    expect(state.messages.some((m) => /bisu/i.test(m.text))).toBe(false);
+
+    await sleep(220);
+    expect(await send(a, "maaf")).toMatchObject({ ok: true });
+  });
+});
+
+describe("abc-words: AFK", () => {
+  type Socket = Parameters<typeof ok>[0];
+  const state = async (socket: Socket) => (await ok<GameRoom>(socket, "room:sync")).state;
+  const idOf = (socket: Socket) => (socket as unknown as { session: { userId: string } }).session.userId;
+  const act = (socket: Socket, action: string, payload?: unknown) =>
+    ok(socket, "room:action", { action, ...(payload !== undefined && { payload }) });
+  const tick = async (socket: Socket) => {
+    await sleep(15);
+    await act(socket, "tick");
+  };
+
+  /** Fase yang menunggu pemain diam selesai setelah waktu ini lewat (lalu `tick`). */
+  const PHASE_MS = 300;
+  const waitPhase = async (host: Socket) => {
+    await sleep(PHASE_MS + 30);
+    await act(host, "tick");
+  };
+
+  /** 3 pemain; waktu fase pendek, jadi fase yang menunggu pemain AFK selesai lewat `tick`. */
+  async function game() {
+    const module = createAbcWordsModule({
+      pickMs: PHASE_MS,
+      revealMs: 1,
+      answerMs: PHASE_MS,
+      lastPlayerMs: PHASE_MS,
+      minAnswerMs: 0,
+      votingMs: PHASE_MS,
+      resultMs: 1,
+      finishedMs: 5000,
+      abandonMs: 5000,
+    });
+    const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" }, [module]);
+    const sockets: Socket[] = [await connect(url, { name: "Aktif0" })];
+    const room = await ok<GameRoom>(sockets[0]!, "room:create", { type: "abc-words", isPublic: true, settings: {} });
+    for (const name of ["Aktif1", "Diam"]) {
+      const socket = await connect(url, { name });
+      await ok(socket, "room:join", { roomId: room.id });
+      sockets.push(socket);
+    }
+    await act(sockets[0]!, "start");
+    return sockets as [Socket, Socket, Socket];
+  }
+
+  /** Satu ronde: dua pemain aktif memilih dan menjawab; `idle` tidak berbuat apa-apa. */
+  async function round(active: Socket[], waitForIdle: boolean) {
+    const [host] = active as [Socket];
+    for (const s of active) await act(s, "pick", { value: 1 });
+    if (waitForIdle) {
+      expect((await state(host)).phase).toBe("picking"); // masih menunggu yang diam
+      await waitPhase(host);
+    }
+    await tick(host); // huruf -> menjawab
+    const letter = (await state(host)).reveal!.letter.toLowerCase();
+    await act(active[0]!, "answer", { text: `${letter}aa` });
+    await act(active[1]!, "answer", { text: `${letter}bb` });
+    if (waitForIdle) {
+      expect((await state(host)).phase).toBe("answering");
+      await waitPhase(host);
+    }
+    for (const s of active) await act(s, "doneVoting", { done: true });
+    if (waitForIdle) {
+      expect((await state(host)).phase).toBe("voting"); // yang diam juga penilai
+      await waitPhase(host);
+    }
+    expect((await state(host)).phase).toBe("result");
+  }
+
+  it("AFK_ROUNDS ronde tanpa memilih dan tanpa menjawab: tidak ditunggu lagi, sampai aktif kembali", async () => {
+    const [p0, p1, idle] = await game();
+    for (let i = 1; i <= AFK_ROUNDS; i++) {
+      await round([p0, p1], true);
+      expect((await state(p0)).idleRounds[idOf(idle)]).toBe(i);
+      await tick(p0); // ronde berikutnya
+    }
+
+    // Ronde berikutnya: AFK, jadi pilih angka dan menjawab tidak menunggunya.
+    await act(p0, "pick", { value: 1 });
+    await act(p1, "pick", { value: 1 });
+    expect((await state(p0)).phase).toBe("reveal");
+    await tick(p0);
+    const letter = (await state(p0)).reveal!.letter.toLowerCase();
+    await act(p0, "answer", { text: `${letter}aa` });
+    await act(p1, "answer", { text: `${letter}bb` });
+    const voting = await state(p0);
+    expect(voting.phase).toBe("voting");
+    // Pemain AFK juga tidak ditunggu menilai.
+    await act(p0, "doneVoting", { done: true });
+    await act(p1, "doneVoting", { done: true });
+    expect((await state(p0)).phase).toBe("result");
+    expect((await state(p0)).penalties.some((p) => p.userId === idOf(idle) && p.reason === "no-answer")).toBe(true);
+    await tick(p0);
+
+    // Ronde setelahnya: memilih angka = aktif lagi, dan ditunggu lagi.
+    await act(idle, "pick", { value: 1 });
+    expect((await state(p0)).idleRounds[idOf(idle)]).toBe(0);
+    await act(p0, "pick", { value: 1 });
+    expect((await state(p0)).phase).toBe("picking"); // masih menunggu p1
+    await act(p1, "pick", { value: 1 });
+    expect((await state(p0)).phase).toBe("reveal");
+  });
+
+  it("memilih angka tapi tidak menjawab, atau sebaliknya, tidak dihitung AFK", async () => {
+    const [p0, p1, idle] = await game();
+    await act(idle, "pick", { value: 1 });
+    await act(p0, "pick", { value: 1 });
+    await act(p1, "pick", { value: 1 });
+    await tick(p0);
+    const letter = (await state(p0)).reveal!.letter.toLowerCase();
+    await act(p0, "answer", { text: `${letter}aa` });
+    await act(p1, "answer", { text: `${letter}bb` });
+    await waitPhase(p0); // waktu menjawab habis; yang diam tidak menjawab
+    for (const s of [p0, p1, idle]) await call(s, "room:action", { action: "doneVoting", payload: { done: true } });
+    expect((await state(p0)).idleRounds[idOf(idle)]).toBe(0);
   });
 });

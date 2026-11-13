@@ -4,6 +4,7 @@ import { createActionFactory, defineRoomModule, type ModuleContext } from "../..
 import type { Room } from "../../core/types.js";
 import { cleanText } from "../../lib/text.js";
 import { chatSendSchema, pushMessage, type ChatState } from "../chat/index.js";
+import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from "../chat/spam-guard.js";
 
 /**
  * Game ABC Words: semua pemain menunjukkan angka 1–10, jumlahnya menjadi huruf,
@@ -22,6 +23,8 @@ export const MAX_PLAYERS = 8;
 export const MIN_PLAYERS = 2;
 /** Jatah menolak jawaban per pemain per permainan. Tolakan yang terbukti benar dikembalikan. */
 export const MAX_REJECTIONS = 3;
+/** Game 2 pemain: satu tolakan langsung menggugurkan jawaban, jadi jatahnya lebih kecil. */
+export const TWO_PLAYER_REJECTIONS = 1;
 /** Alasan wajib saat menolak jawaban; ditampilkan ke semua pemain. */
 export const REJECT_REASONS = ["off-category", "misspelled", "not-a-word"] as const;
 export type RejectReason = (typeof REJECT_REASONS)[number];
@@ -68,7 +71,40 @@ export interface Answer {
   points: number | null;
 }
 
-export type AnswerResult = { status: "accepted" | "duplicate" | "near-tie" };
+/** `retryAfterMs` ada kalau penolakan ini memulai jeda menjawab. */
+export type AnswerResult = { status: "accepted" | "duplicate" | "near-tie"; retryAfterMs?: number };
+
+/** Poin per hasil. Skor tidak pernah turun di bawah 0. */
+export const POINTS = {
+  accepted: 1,
+  /** Lebih berat dari tidak menjawab, supaya asal menjawab tidak pernah menguntungkan. */
+  rejected: -2,
+  noAnswer: -1,
+  /** Menolak jawaban yang lolos tanpa didukung pemain lain, setelah peringatan habis. */
+  loneRejection: -1,
+} as const;
+
+/**
+ * Menolak sendirian (game 3 pemain atau lebih), dihitung per permainan:
+ * yang pertama diam-diam (tanpa catatan apa pun), yang kedua peringatan,
+ * mulai yang ketiga dianggap sengaja dan dikenai `POINTS.loneRejection`.
+ */
+export const LONE_REJECTION_WARNINGS = 2;
+
+/** Pengurangan poin di luar jawaban sendiri, ditampilkan di hasil ronde. */
+export interface Penalty {
+  userId: string;
+  name: string;
+  reason: "no-answer" | "lone-rejection";
+  /** Tolakan sendirian ke berapa dalam permainan ini; `null` untuk "no-answer". */
+  strike: number | null;
+  /** `true` kalau baru peringatan (kartu kuning), tanpa potongan poin. */
+  warning: boolean;
+  /** Jawaban yang ditolak sendirian; `null` untuk "no-answer". */
+  answerText: string | null;
+  /** Perubahan skor yang benar-benar terjadi (0 kalau skor sudah 0). */
+  points: number;
+}
 
 export interface AbcWordsState extends ChatState {
   phase: "waiting" | "picking" | "reveal" | "answering" | "voting" | "result" | "finished";
@@ -96,6 +132,16 @@ export interface AbcWordsState extends ChatState {
   scores: Record<string, number>;
   /** Jatah tolak yang sudah terpakai dalam satu permainan. */
   rejectionsUsed: Record<string, number>;
+  /** Jatah tolak per pemain untuk permainan ini; ditetapkan saat permainan dimulai. */
+  rejectionLimit: number;
+  /** Pemain yang sudah selesai menilai di ronde ini; voting berakhir saat semua penilai selesai. */
+  votingDone: string[];
+  /** Hukuman di ronde ini; diisi saat hasil ronde keluar. */
+  penalties: Penalty[];
+  /** Jumlah tolakan sendirian per pemain dalam satu permainan; terlihat semua pemain. */
+  loneRejections: Record<string, number>;
+  /** Ronde berturut-turut tanpa memilih angka dan tanpa menjawab; lihat `AFK_ROUNDS`. */
+  idleRounds: Record<string, number>;
 }
 
 export interface AbcWordsTiming {
@@ -113,6 +159,10 @@ export interface AbcWordsTiming {
   /** Jawaban lebih cepat dari ini setelah fase menjawab dimulai ditolak (anti bot). */
   minAnswerMs: number;
   votingMs: number;
+  /** Jawaban yang ditolak (duplikat, format, huruf) sebanyak `ANSWER_RETRY_LIMIT` dalam selang ini... */
+  retryWindowMs: number;
+  /** ...membuat pemain harus menunggu selama ini sebelum boleh menjawab lagi. */
+  retryCooldownMs: number;
   resultMs: number;
   /** Layar skor akhir kembali sendiri ke ruang tunggu setelah selang ini. */
   finishedMs: number;
@@ -127,10 +177,21 @@ const DEFAULT_TIMING: AbcWordsTiming = {
   nearTieMs: 2_000,
   graceMs: 10_000,
   minAnswerMs: 1_000,
-  votingMs: 15_000,
+  votingMs: 20_000,
+  retryWindowMs: 5_000,
+  retryCooldownMs: 3_000,
   resultMs: 5_000,
   finishedMs: 30_000,
 };
+
+/**
+ * Pemain yang tidak memilih angka DAN tidak menjawab selama ronde sebanyak ini berturut-turut
+ * dianggap AFK: permainan tidak menunggunya lagi. Begitu ia memilih angka atau menjawab, ia aktif lagi.
+ */
+export const AFK_ROUNDS = 2;
+
+/** Lihat `AbcWordsTiming.retryWindowMs`. */
+export const ANSWER_RETRY_LIMIT = 3;
 
 const ANSWER_MIN = 2;
 const ANSWER_MAX = 40;
@@ -159,10 +220,44 @@ function isValidAnswerKey(key: string): boolean {
   return key.length >= ANSWER_MIN && key.length <= ANSWER_MAX && /^[a-z ]+$/.test(key);
 }
 
-type RoundFields = "picks" | "reveal" | "answers" | "answeringStartedAt" | "lastCallUsed" | "graceUsedBy";
+type RoundFields =
+  | "picks"
+  | "reveal"
+  | "answers"
+  | "answeringStartedAt"
+  | "lastCallUsed"
+  | "graceUsedBy"
+  | "votingDone"
+  | "penalties";
 
 function emptyRound(): Pick<AbcWordsState, RoundFields> {
-  return { picks: {}, reveal: null, answers: [], answeringStartedAt: null, lastCallUsed: false, graceUsedBy: [] };
+  return {
+    picks: {},
+    reveal: null,
+    answers: [],
+    answeringStartedAt: null,
+    lastCallUsed: false,
+    graceUsedBy: [],
+    votingDone: [],
+    penalties: [],
+  };
+}
+
+function isAfk(state: AbcWordsState, userId: string): boolean {
+  return (state.idleRounds[userId] ?? 0) >= AFK_ROUNDS;
+}
+
+/** Pemain yang ditunggu permainan: online dan tidak AFK. */
+function activePlayers(room: Room<AbcWordsState, AbcWordsSettings>) {
+  return room.members.filter((m) => m.isConnected && !isAfk(room.state, m.userId));
+}
+
+/** Pemain aktif yang punya jawaban orang lain untuk dinilai. */
+function judgesOf(room: Room<AbcWordsState, AbcWordsSettings>): string[] {
+  const { answers } = room.state;
+  return activePlayers(room)
+    .filter((m) => answers.some((a) => a.userId !== m.userId))
+    .map((m) => m.userId);
 }
 
 function idleFields() {
@@ -175,6 +270,9 @@ function idleFields() {
     usedLetters: [] as string[],
     scores: {} as Record<string, number>,
     rejectionsUsed: {} as Record<string, number>,
+    rejectionLimit: MAX_REJECTIONS,
+    loneRejections: {} as Record<string, number>,
+    idleRounds: {} as Record<string, number>,
     ...emptyRound(),
   };
 }
@@ -191,8 +289,50 @@ function backToWaiting(ctx: Ctx, text: string): void {
   pushMessage(ctx, { userId: null, name: "system", text });
 }
 
-export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
+export function createAbcWordsModule(
+  overrides: Partial<AbcWordsTiming> = {},
+  chatRules: Partial<ChatSpamRules> = {},
+) {
   const timing: AbcWordsTiming = { ...DEFAULT_TIMING, ...overrides };
+  const chatGuard = createChatSpamGuard({ ...DEFAULT_CHAT_SPAM_RULES, ...chatRules });
+
+  /**
+   * Jawaban yang ditolak per pemain, untuk jeda menjawab. Disimpan di luar state room karena
+   * `ctx.fail` membatalkan semua perubahan state, padahal penolakan justru harus tercatat.
+   * Kunci: `roomId:userId`; isinya otomatis usang begitu ronde berganti.
+   */
+  const retries = new Map<string, { round: number; failures: number[]; until: number }>();
+
+  function retryEntry(ctx: Ctx, userId: string) {
+    const key = `${ctx.room.id}:${userId}`;
+    let entry = retries.get(key);
+    if (!entry || entry.round !== ctx.room.state.round) {
+      entry = { round: ctx.room.state.round, failures: [], until: 0 };
+      retries.set(key, entry);
+    }
+    return entry;
+  }
+
+  /**
+   * Mencatat jawaban yang ditolak; yang ke-`ANSWER_RETRY_LIMIT` dalam selang singkat memulai jeda.
+   * Mengembalikan `{ retryAfterMs }` kalau jeda baru dimulai, supaya pemain langsung tahu.
+   */
+  function recordRejectedAnswer(ctx: Ctx, userId: string): { retryAfterMs: number } | undefined {
+    const now = ctx.now();
+    // Buang catatan lama (room yang sudah selesai, jeda yang sudah lewat) supaya tidak menumpuk.
+    if (retries.size > 1_000) {
+      for (const [key, e] of retries) {
+        if (e.until <= now && e.failures.every((at) => now - at >= timing.retryWindowMs)) retries.delete(key);
+      }
+    }
+    const entry = retryEntry(ctx, userId);
+    entry.failures = entry.failures.filter((at) => now - at < timing.retryWindowMs);
+    entry.failures.push(now);
+    if (entry.failures.length < ANSWER_RETRY_LIMIT) return undefined;
+    entry.until = now + timing.retryCooldownMs;
+    entry.failures = [];
+    return { retryAfterMs: timing.retryCooldownMs };
+  }
 
   function startRound(ctx: Ctx, round: number): void {
     const { state } = ctx.room;
@@ -221,28 +361,72 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
 
   /**
    * Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya.
-   * Lolos +1, gugur -1 (skor tidak turun di bawah 0) supaya asal menjawab tidak menguntungkan.
-   * Penolak jawaban yang gugur mendapat jatah tolaknya kembali; penolak jawaban yang lolos tidak.
+   * Poin (lihat `POINTS`): lolos +1, gugur -2, tidak menjawab -1, menolak sendirian jawaban yang
+   * tetap lolos -1 setelah dua peringatan (hanya game 3 pemain atau lebih). Skor tidak turun di bawah 0.
+   * Penolak jawaban yang gugur mendapat jatah tolaknya kembali kalau ada pemain lain yang ikut menolak;
+   * penolak jawaban yang lolos tidak. Tolakan sepihak (game 2 pemain) tidak dikembalikan.
    */
   function showResult(ctx: Ctx): void {
     const { state, members } = ctx.room;
     const online = members.filter((m) => m.isConnected).map((m) => m.userId);
+    /** Mengubah skor dan mengembalikan perubahan yang benar-benar terjadi. */
+    const addScore = (userId: string, points: number): number => {
+      const before = state.scores[userId] ?? 0;
+      const after = Math.max(before + points, 0);
+      state.scores[userId] = after;
+      return after - before;
+    };
 
     for (const answer of state.answers) {
       const voters = online.filter((id) => id !== answer.userId);
-      const rejections = answer.rejectedBy.filter((r) => voters.includes(r.userId)).length;
-      answer.accepted = rejections * 2 <= voters.length;
+      const counted = answer.rejectedBy.filter((r) => voters.includes(r.userId));
+      answer.accepted = counted.length * 2 <= voters.length;
+      answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : POINTS.rejected);
 
-      const before = state.scores[answer.userId] ?? 0;
-      const after = answer.accepted ? before + 1 : Math.max(before - 1, 0);
-      answer.points = after - before;
-      state.scores[answer.userId] = after;
-
-      if (!answer.accepted) {
+      if (!answer.accepted && counted.length >= 2) {
         for (const { userId } of answer.rejectedBy) {
           state.rejectionsUsed[userId] = Math.max((state.rejectionsUsed[userId] ?? 0) - 1, 0);
         }
       }
+      const lone = counted[0];
+      if (answer.accepted && counted.length === 1 && lone && voters.length >= 2) {
+        const strike = (state.loneRejections[lone.userId] ?? 0) + 1;
+        state.loneRejections[lone.userId] = strike;
+        const warning = strike <= LONE_REJECTION_WARNINGS;
+        // Kesalahan pertama tidak diumumkan.
+        if (strike > 1) {
+          state.penalties.push({
+            userId: lone.userId,
+            name: lone.name,
+            reason: "lone-rejection",
+            answerText: answer.text,
+            strike,
+            warning,
+            points: warning ? 0 : addScore(lone.userId, POINTS.loneRejection),
+          });
+        }
+      }
+    }
+
+    // AFK: ronde tanpa memilih angka dan tanpa menjawab dihitung berturut-turut.
+    for (const member of members) {
+      const picked = state.reveal?.picks.some((p) => p.userId === member.userId && !p.auto) ?? false;
+      const answered = state.answers.some((a) => a.userId === member.userId);
+      state.idleRounds[member.userId] = picked || answered ? 0 : (state.idleRounds[member.userId] ?? 0) + 1;
+    }
+
+    // Semua pemain di room yang tidak menjawab, termasuk yang sedang putus koneksi.
+    for (const member of members) {
+      if (state.answers.some((a) => a.userId === member.userId)) continue;
+      state.penalties.push({
+        userId: member.userId,
+        name: member.name,
+        reason: "no-answer",
+        answerText: null,
+        strike: null,
+        warning: false,
+        points: addScore(member.userId, POINTS.noAnswer),
+      });
     }
 
     state.phase = "result";
@@ -254,11 +438,11 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
     setDeadline(ctx, timing.finishedMs);
   }
 
-  /** Selesai kalau semua pemain online sudah menjawab; pemain terakhir dapat waktu sendiri. */
+  /** Selesai kalau semua pemain aktif sudah menjawab; pemain terakhir dapat waktu sendiri. */
   function checkAnswering(ctx: Ctx): void {
-    const { state, members } = ctx.room;
+    const { state } = ctx.room;
     if (state.phase !== "answering") return;
-    const waitingFor = members.filter((m) => m.isConnected && !state.answers.some((a) => a.userId === m.userId));
+    const waitingFor = activePlayers(ctx.room).filter((m) => !state.answers.some((a) => a.userId === m.userId));
     if (waitingFor.length === 0) {
       finishAnswering(ctx);
     } else if (waitingFor.length === 1 && !state.lastCallUsed) {
@@ -289,12 +473,19 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
     state.reveal = { picks, total, letter, skippedFrom };
   }
 
-  /** Pemain yang putus tidak ditunggu; server memilihkan angka untuk mereka. */
+  /** Voting selesai lebih awal kalau semua penilai yang online sudah menekan "selesai". */
+  function checkVoting(ctx: Ctx): void {
+    const { state } = ctx.room;
+    if (state.phase !== "voting") return;
+    if (judgesOf(ctx.room).every((id) => state.votingDone.includes(id))) showResult(ctx);
+  }
+
+  /** Pemain yang putus atau AFK tidak ditunggu; server memilihkan angka untuk mereka. */
   function revealIfEveryonePicked(ctx: Ctx): void {
     const { room } = ctx;
     if (room.state.phase !== "picking") return;
-    const online = room.members.filter((m) => m.isConnected);
-    if (online.length > 0 && online.every((m) => room.state.picks[m.userId] !== undefined)) revealLetter(ctx);
+    const active = activePlayers(room);
+    if (active.length > 0 && active.every((m) => room.state.picks[m.userId] !== undefined)) revealLetter(ctx);
   }
 
   /**
@@ -338,7 +529,7 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
         remainingMs: deadline === null ? null : Math.max(deadline - Date.now(), 0),
         pickedBy: Object.keys(picks),
         myPick: viewerId === null ? null : (picks[viewerId] ?? null),
-        rejectionsLeft: MAX_REJECTIONS - (viewerId === null ? 0 : (rejectionsUsed[viewerId] ?? 0)),
+        rejectionsLeft: state.rejectionLimit - (viewerId === null ? 0 : (rejectionsUsed[viewerId] ?? 0)),
       };
     },
 
@@ -359,12 +550,14 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
       watchOnlinePlayers(ctx);
       revealIfEveryonePicked(ctx);
       checkAnswering(ctx);
+      checkVoting(ctx);
     },
 
     onMemberPresence(ctx) {
       watchOnlinePlayers(ctx);
       revealIfEveryonePicked(ctx);
       checkAnswering(ctx);
+      checkVoting(ctx);
     },
 
     onHostChange(ctx) {
@@ -392,6 +585,8 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
           }
 
           room.state.endedReason = null;
+          const players = room.members.filter((m) => m.isConnected).length;
+          room.state.rejectionLimit = players === 2 ? TWO_PLAYER_REJECTIONS : MAX_REJECTIONS;
           ctx.setLocked(true); // pemain baru tidak bisa masuk selama permainan
           pushMessage(ctx, { userId: null, name: "system", text: "Permainan dimulai" });
           startRound(ctx, 1);
@@ -403,6 +598,7 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
         handler(ctx, { value }) {
           if (ctx.room.state.phase !== "picking") ctx.fail("WRONG_PHASE", "Waktu memilih angka sudah lewat");
           ctx.room.state.picks[ctx.sender!.userId] = value;
+          ctx.room.state.idleRounds[ctx.sender!.userId] = 0; // kembali aktif
           revealIfEveryonePicked(ctx);
         },
       }),
@@ -423,18 +619,33 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
           if (state.answers.some((a) => a.userId === sender.userId))
             ctx.fail("ALREADY_ANSWERED", "Kamu sudah menjawab");
 
+          const { until } = retryEntry(ctx, sender.userId);
+          if (now < until) {
+            const retryAfterMs = until - now;
+            ctx.fail(
+              "SLOW_DOWN",
+              `Terlalu banyak percobaan. Tunggu ${Math.ceil(retryAfterMs / 1000)} detik lagi.`,
+              { retryAfterMs },
+            );
+          }
+
           const cleaned = cleanText(text);
           const key = answerKey(cleaned);
           if (!isValidAnswerKey(key)) {
-            ctx.fail("INVALID_ANSWER", `Jawaban harus ${ANSWER_MIN}–${ANSWER_MAX} karakter, hanya huruf dan spasi`);
+            const pause = recordRejectedAnswer(ctx, sender.userId);
+            ctx.fail("INVALID_ANSWER", `Jawaban harus ${ANSWER_MIN}–${ANSWER_MAX} karakter, hanya huruf dan spasi`, pause);
           }
           const letter = state.reveal!.letter;
-          if (key[0]!.toUpperCase() !== letter) ctx.fail("WRONG_LETTER", `Jawaban harus berawalan huruf ${letter}`);
+          if (key[0]!.toUpperCase() !== letter) {
+            const pause = recordRejectedAnswer(ctx, sender.userId);
+            ctx.fail("WRONG_LETTER", `Jawaban harus berawalan huruf ${letter}`, pause);
+          }
 
           const existing = state.answers.find((a) => a.key === key);
           if (existing) {
+            // Keduluan tidak dihitung: itu sial, bukan menebak-nebak.
             const nearTie = now - existing.at < timing.nearTieMs && !state.graceUsedBy.includes(sender.userId);
-            if (!nearTie) return { status: "duplicate" };
+            if (!nearTie) return { status: "duplicate", ...recordRejectedAnswer(ctx, sender.userId) };
             state.graceUsedBy.push(sender.userId);
             if (state.deadline - now < timing.graceMs) setDeadline(ctx, timing.graceMs);
             return { status: "near-tie" };
@@ -450,6 +661,7 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
             accepted: null,
             points: null,
           });
+          state.idleRounds[sender.userId] = 0; // kembali aktif
           checkAnswering(ctx);
           return { status: "accepted" };
         },
@@ -482,13 +694,29 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
               mine.reason = payload.reason;
               return;
             }
-            if (used >= MAX_REJECTIONS) ctx.fail("NO_REJECTIONS_LEFT", "Jatah tolak kamu sudah habis");
+            if (used >= state.rejectionLimit) ctx.fail("NO_REJECTIONS_LEFT", "Jatah tolak kamu sudah habis");
             answer.rejectedBy.push({ userId: sender.userId, name: sender.name, reason: payload.reason });
             state.rejectionsUsed[sender.userId] = used + 1;
           } else if (index >= 0) {
             answer.rejectedBy.splice(index, 1);
             state.rejectionsUsed[sender.userId] = used - 1;
           }
+        },
+      }),
+
+      /** Menandai (atau membatalkan) "selesai menilai"; voting berakhir saat semua penilai selesai. */
+      doneVoting: action({
+        schema: z.object({ done: z.boolean() }),
+        handler(ctx, { done }) {
+          const { state } = ctx.room;
+          const userId = ctx.sender!.userId;
+          if (state.phase !== "voting") ctx.fail("WRONG_PHASE", "Waktu voting sudah habis");
+          if (!judgesOf(ctx.room).includes(userId)) ctx.fail("NOTHING_TO_JUDGE", "Tidak ada jawaban untuk kamu nilai");
+
+          const index = state.votingDone.indexOf(userId);
+          if (done && index < 0) state.votingDone.push(userId);
+          if (!done && index >= 0) state.votingDone.splice(index, 1);
+          checkVoting(ctx);
         },
       }),
 
@@ -525,6 +753,10 @@ export function createAbcWordsModule(overrides: Partial<AbcWordsTiming> = {}) {
         schema: chatSendSchema,
         sync: false,
         handler(ctx, { text }) {
+          const verdict = chatGuard.check(ctx.room.id, ctx.sender!.userId, text, ctx.now());
+          if (!verdict.ok) {
+            ctx.fail(verdict.code, verdict.message, verdict.retryAfterMs ? { retryAfterMs: verdict.retryAfterMs } : undefined);
+          }
           const message = pushMessage(ctx, { userId: ctx.sender!.userId, name: ctx.sender!.name, text });
           ctx.emit("chat:message", message);
           return message;
