@@ -8,7 +8,7 @@ import { createProfanityChecker } from "../chat/profanity.js";
 import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from "../chat/spam-guard.js";
 
 /**
- * Game ABC Words: semua pemain menunjukkan angka 1–10, jumlahnya menjadi huruf,
+ * Game ABC Lima Dasar: semua pemain menunjukkan angka 1–10, jumlahnya menjadi huruf,
  * lalu berlomba memberi jawaban berawalan huruf itu sesuai kategori.
  *
  * Sudah ada: ruang tunggu, konfigurasi game (lewat `room:update`), chat, pilih angka,

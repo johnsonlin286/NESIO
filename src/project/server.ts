@@ -10,7 +10,7 @@ import { LobbyAwareRoomStore } from "./lobby-store.js";
 import { createPlayerNameGuard } from "./player-names.js";
 
 /**
- * Room server dengan aturan khusus ABC Words:
+ * Room server dengan aturan khusus ABC Lima Dasar:
  * nama pemain unik & aman, sinyal `rooms:changed` untuk daftar room lobby,
  * dan jam yang memajukan fase game.
  */

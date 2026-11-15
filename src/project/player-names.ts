@@ -4,7 +4,7 @@ import { AppError } from "../lib/errors.js";
 import type { AppServer, AppSocket } from "../socket/types.js";
 
 /**
- * Aturan nama pemain ABC Words (juga dicek di client):
+ * Aturan nama pemain ABC Lima Dasar (juga dicek di client):
  * 3–20 karakter, hanya huruf ASCII, angka, underscore dan dash.
  * Whitelist ini membuat nama aman dipakai di mana pun (HTML, log, URL).
  */
@@ -64,7 +64,7 @@ export function createPlayerNameGuard({ base, store, io, now = Date.now }: Playe
 
   const authenticate: Authenticator = async (input) => {
     const name = input.auth.name;
-    // Mode guest tanpa nama akan memberi nama "Guest-XXXX"; ABC Words mewajibkan nama sendiri.
+    // Mode guest tanpa nama akan memberi nama "Guest-XXXX"; ABC Lima Dasar mewajibkan nama sendiri.
     if (!name || !isValidPlayerName(name)) throw new AppError(INVALID_NAME, "Nama tidak valid");
 
     const result = await base(input);
@@ -94,7 +94,7 @@ export function createPlayerNameGuard({ base, store, io, now = Date.now }: Playe
 
 /**
  * `room:create` / `room:join` menerima `displayName` yang mengganti nama per room.
- * ABC Words tidak memakainya, dan field itu bisa dipakai untuk melewati aturan nama,
+ * ABC Lima Dasar tidak memakainya, dan field itu bisa dipakai untuk melewati aturan nama,
  * jadi dibuang sebelum sampai ke handler core.
  */
 function stripNameOverrides(socket: AppSocket): void {
