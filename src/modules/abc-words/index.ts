@@ -33,10 +33,9 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 const settingsSchema = z.object({
   historyLimit: z.number().int().min(0).max(200).default(50),
-  category: z.enum(["bebas", "hewan", "lagu", "film", "kota-indonesia", "negara", "custom"]).default("bebas"),
+  category: z.enum(["bebas", "hewan", "lagu", "film", "negara", "custom"]).default("bebas"),
   /** Dipakai kalau `category` = "custom". */
   customCategory: z.string().transform(cleanText).pipe(z.string().max(40)).default(""),
-  language: z.enum(["id", "en"]).default("id"),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS).default(MAX_ROUNDS),
 });
 export type AbcWordsSettings = z.infer<typeof settingsSchema>;
@@ -55,6 +54,8 @@ export interface Reveal {
   letter: string;
   /** Huruf hasil hitungan kalau sudah pernah keluar, sehingga dilompati. */
   skippedFrom: string | null;
+  /** Huruf yang diganti lewat voting "ganti huruf" di ronde ini; `null` kalau tidak diganti. */
+  changedFrom: string | null;
 }
 
 export interface Answer {
@@ -139,6 +140,8 @@ export interface AbcWordsState extends ChatState {
   votingDone: string[];
   /** Hukuman di ronde ini; diisi saat hasil ronde keluar. */
   penalties: Penalty[];
+  /** Pemain yang ingin huruf ronde ini diganti (fase reveal). */
+  letterVotes: string[];
   /** Jumlah tolakan sendirian per pemain dalam satu permainan; terlihat semua pemain. */
   loneRejections: Record<string, number>;
   /** Ronde berturut-turut tanpa memilih angka dan tanpa menjawab; lihat `AFK_ROUNDS`. */
@@ -147,7 +150,10 @@ export interface AbcWordsState extends ChatState {
 
 export interface AbcWordsTiming {
   pickMs: number;
+  /** Lama huruf ditampilkan; selama itu pemain bisa voting "ganti huruf". */
   revealMs: number;
+  /** Lama huruf pengganti ditampilkan sebelum menjawab dimulai. */
+  changedRevealMs: number;
   /** Jeda sebelum game dihentikan saat pemain online kurang, supaya refresh tidak mematikan game. */
   abandonMs: number;
   answerMs: number;
@@ -171,7 +177,8 @@ export interface AbcWordsTiming {
 
 const DEFAULT_TIMING: AbcWordsTiming = {
   pickMs: 10_000,
-  revealMs: 4_000,
+  revealMs: 7_000,
+  changedRevealMs: 3_000,
   abandonMs: 5_000,
   answerMs: 30_000,
   lastPlayerMs: 10_000,
@@ -212,6 +219,18 @@ export function drawLetter(total: number, used: readonly string[]): { letter: st
   throw new Error("Semua huruf sudah terpakai");
 }
 
+/**
+ * Bentuk jawaban yang ditampilkan ke semua pemain: setiap kata diawali huruf kapital
+ * ("ayAm" -> "Ayam", "seventeen again" -> "Seventeen Again"), supaya mudah dibaca saat voting.
+ */
+export function displayAnswer(cleaned: string): string {
+  return cleaned
+    .toLocaleLowerCase("id")
+    .split(" ")
+    .map((word) => word.charAt(0).toLocaleUpperCase("id") + word.slice(1))
+    .join(" ");
+}
+
 /** Huruf kecil tanpa aksen, spasi sudah dirapikan oleh `cleanText`. */
 export function answerKey(cleaned: string): string {
   return cleaned.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
@@ -229,7 +248,8 @@ type RoundFields =
   | "lastCallUsed"
   | "graceUsedBy"
   | "votingDone"
-  | "penalties";
+  | "penalties"
+  | "letterVotes";
 
 function emptyRound(): Pick<AbcWordsState, RoundFields> {
   return {
@@ -241,6 +261,7 @@ function emptyRound(): Pick<AbcWordsState, RoundFields> {
     graceUsedBy: [],
     votingDone: [],
     penalties: [],
+    letterVotes: [],
   };
 }
 
@@ -472,7 +493,32 @@ export function createAbcWordsModule(
     setDeadline(ctx, timing.revealMs);
     state.picks = {};
     state.usedLetters.push(letter);
-    state.reveal = { picks, total, letter, skippedFrom };
+    state.reveal = { picks, total, letter, skippedFrom, changedFrom: null };
+  }
+
+  /**
+   * Voting "ganti huruf": kalau lebih dari separuh pemain aktif setuju, huruf ini dicoret
+   * (tidak keluar lagi di permainan ini) dan diganti huruf acak yang belum terpakai, supaya
+   * penggantinya tidak selalu tetangga yang sama sulitnya (P -> Q). Paling banyak sekali per ronde.
+   */
+  function checkLetterVote(ctx: Ctx): void {
+    const { state } = ctx.room;
+    const reveal = state.reveal;
+    if (state.phase !== "reveal" || !reveal || reveal.changedFrom !== null) return;
+    const active = activePlayers(ctx.room).map((m) => m.userId);
+    const votes = state.letterVotes.filter((id) => active.includes(id)).length;
+    if (active.length === 0 || votes * 2 <= active.length) return;
+
+    const old = reveal.letter;
+    const unused = [...ALPHABET].filter((letter) => !state.usedLetters.includes(letter));
+    if (unused.length === 0) return; // tidak terjadi dengan maksimal 10 ronde, tapi jangan sampai error
+    const next = unused[randomInt(unused.length)]!;
+    state.usedLetters.push(next);
+    reveal.changedFrom = old;
+    reveal.letter = next;
+    state.letterVotes = [];
+    setDeadline(ctx, timing.changedRevealMs);
+    pushMessage(ctx, { userId: null, name: "system", text: `Huruf ${old} diganti menjadi ${next}` });
   }
 
   /** Voting selesai lebih awal kalau semua penilai yang online sudah menekan "selesai". */
@@ -558,6 +604,7 @@ export function createAbcWordsModule(
     onMemberPresence(ctx) {
       watchOnlinePlayers(ctx);
       revealIfEveryonePicked(ctx);
+      checkLetterVote(ctx);
       checkAnswering(ctx);
       checkVoting(ctx);
     },
@@ -656,7 +703,7 @@ export function createAbcWordsModule(
           state.answers.push({
             userId: sender.userId,
             name: sender.name,
-            text: cleaned,
+            text: displayAnswer(cleaned),
             key,
             at: now,
             rejectedBy: [],
@@ -703,6 +750,22 @@ export function createAbcWordsModule(
             answer.rejectedBy.splice(index, 1);
             state.rejectionsUsed[sender.userId] = used - 1;
           }
+        },
+      }),
+
+      /** Setuju (atau batal setuju) mengganti huruf ronde ini; lihat `checkLetterVote`. */
+      changeLetter: action({
+        schema: z.object({ want: z.boolean() }),
+        handler(ctx, { want }) {
+          const { state } = ctx.room;
+          const userId = ctx.sender!.userId;
+          if (state.phase !== "reveal" || !state.reveal) ctx.fail("WRONG_PHASE", "Huruf hanya bisa diganti saat baru keluar");
+          if (state.reveal!.changedFrom !== null) ctx.fail("ALREADY_CHANGED", "Huruf ronde ini sudah diganti sekali");
+
+          const index = state.letterVotes.indexOf(userId);
+          if (want && index < 0) state.letterVotes.push(userId);
+          if (!want && index >= 0) state.letterVotes.splice(index, 1);
+          checkLetterVote(ctx);
         },
       }),
 

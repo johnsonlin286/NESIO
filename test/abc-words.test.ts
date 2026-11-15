@@ -37,23 +37,23 @@ describe("abc-words: ruang tunggu", () => {
     const { room } = await setup();
     expect(room.state.phase).toBe("waiting");
     expect(room.maxMembers).toBe(8);
-    expect(room.settings).toMatchObject({ category: "bebas", customCategory: "", language: "id", maxRounds: 10 });
+    expect(room.settings).toEqual({ historyLimit: 50, category: "bebas", customCategory: "", maxRounds: 10 });
   });
 
   it("host mengubah konfigurasi dan pemain lain langsung menerimanya", async () => {
     const { host, guest } = await setup();
     const received = waitFor<GameRoom>(guest, "room:state", (r) => r.settings.category === "film");
 
-    await ok(host, "room:update", { settings: { category: "film", language: "en", maxRounds: 5 } });
+    await ok(host, "room:update", { settings: { category: "film", maxRounds: 5 } });
 
-    expect((await received).settings).toMatchObject({ category: "film", language: "en", maxRounds: 5 });
+    expect((await received).settings).toMatchObject({ category: "film", maxRounds: 5 });
   });
 
   it("perubahan sebagian tidak menghapus konfigurasi lain", async () => {
     const { host } = await setup();
-    await ok(host, "room:update", { settings: { language: "en" } });
+    await ok(host, "room:update", { settings: { category: "hewan" } });
     const room = await ok<GameRoom>(host, "room:update", { settings: { maxRounds: 3 } });
-    expect(room.settings).toMatchObject({ language: "en", maxRounds: 3 });
+    expect(room.settings).toMatchObject({ category: "hewan", maxRounds: 3 });
   });
 
   it("hanya host yang boleh mengubah konfigurasi", async () => {
@@ -67,7 +67,7 @@ describe("abc-words: ruang tunggu", () => {
   it.each([
     ["ronde lebih dari 10", { maxRounds: 11 }],
     ["ronde nol", { maxRounds: 0 }],
-    ["bahasa tidak dikenal", { language: "fr" }],
+    ["kategori yang sudah dihapus", { category: "kota-indonesia" }],
     ["kategori tidak dikenal", { category: "makanan" }],
     ["kategori sendiri terlalu panjang", { customCategory: "x".repeat(41) }],
   ])("menolak %s", async (_label, settings) => {
@@ -607,6 +607,12 @@ describe("abc-words: menjawab", () => {
     expect(seen.answers[0]).toMatchObject({ name: "Host", text: "Cicak" });
     expect(seen.answers[0]).not.toHaveProperty("key");
     expect(await state(b)).not.toHaveProperty("graceUsedBy");
+  });
+
+  it("jawaban ditampilkan dengan huruf awal kapital di setiap kata", async () => {
+    const { a, b } = await answering(3, [1, 1, 1]); // C
+    await answer(a, "  cICAK   hijau ");
+    expect((await state(b)).answers[0]!.text).toBe("Cicak Hijau");
   });
 
   it("3 jawaban ditolak dalam waktu singkat: jeda sebelum boleh menjawab lagi", async () => {
@@ -1343,5 +1349,120 @@ describe("abc-words: AFK", () => {
     await waitPhase(p0); // waktu menjawab habis; yang diam tidak menjawab
     for (const s of [p0, p1, idle]) await call(s, "room:action", { action: "doneVoting", payload: { done: true } });
     expect((await state(p0)).idleRounds[idOf(idle)]).toBe(0);
+  });
+});
+
+describe("abc-words: voting ganti huruf", () => {
+  type Socket = Parameters<typeof ok>[0];
+  const state = async (socket: Socket) => (await ok<GameRoom>(socket, "room:sync")).state;
+  const vote = (socket: Socket, want = true) =>
+    call(socket, "room:action", { action: "changeLetter", payload: { want } });
+
+  /** `players` pemain memilih angka 1, jadi hurufnya = huruf ke-`players` (3 -> C). Berhenti di fase reveal. */
+  async function reveal(players: number, timing: Parameters<typeof createAbcWordsModule>[0] = {}) {
+    const module = createAbcWordsModule({
+      pickMs: 5000,
+      revealMs: 5000,
+      changedRevealMs: 20,
+      answerMs: 5000,
+      minAnswerMs: 0,
+      ...timing,
+    });
+    const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" }, [module]);
+    const sockets: Socket[] = [await connect(url, { name: "Host" })];
+    const room = await ok<GameRoom>(sockets[0]!, "room:create", { type: "abc-words", isPublic: true });
+    for (let i = 1; i < players; i++) {
+      const guest = await connect(url, { name: `Tamu${i}` });
+      await ok(guest, "room:join", { roomId: room.id });
+      sockets.push(guest);
+    }
+    await ok(sockets[0]!, "room:action", { action: "start" });
+    for (const s of sockets) await ok(s, "room:action", { action: "pick", payload: { value: 1 } });
+    return sockets;
+  }
+
+  it("lebih dari separuh setuju: huruf dicoret dan diganti huruf acak yang belum terpakai", async () => {
+    const [a, b] = (await reveal(3)) as [Socket, Socket, Socket];
+    expect((await state(a)).reveal).toMatchObject({ letter: "C", changedFrom: null });
+
+    expect(await vote(a)).toMatchObject({ ok: true });
+    expect((await state(a)).reveal!.letter).toBe("C"); // 1 dari 3 belum cukup
+    expect((await state(a)).letterVotes).toHaveLength(1);
+
+    await vote(b); // 2 dari 3
+    const now = await state(a);
+    const next = now.reveal!.letter;
+    expect(now.phase).toBe("reveal");
+    expect(now.reveal!.changedFrom).toBe("C");
+    expect(next).toMatch(/^[A-Z]$/);
+    expect(next).not.toBe("C");
+    expect(now.usedLetters).toEqual(["C", next]); // C tidak akan keluar lagi
+    expect(now.letterVotes).toEqual([]);
+    expect(now.messages.at(-1)?.text).toBe(`Huruf C diganti menjadi ${next}`);
+
+    // Huruf pengganti tampil sebentar, lalu menjawab dengan huruf baru.
+    await sleep(30);
+    await ok(a, "room:action", { action: "tick" });
+    expect((await state(a)).phase).toBe("answering");
+    const wrong = next === "B" ? "Cicak" : "Bebek";
+    expect(await call(a, "room:action", { action: "answer", payload: { text: wrong } })).toMatchObject({
+      ok: false,
+      error: { code: "WRONG_LETTER" },
+    });
+  });
+
+  it("hanya sekali per ronde", async () => {
+    const [a, b, c] = (await reveal(3)) as [Socket, Socket, Socket];
+    await vote(a);
+    await vote(b);
+    expect(await vote(c)).toMatchObject({ ok: false, error: { code: "ALREADY_CHANGED" } });
+  });
+
+  it("setuju bisa dibatalkan; tanpa mayoritas, huruf tetap", async () => {
+    const [a, b] = (await reveal(3, { revealMs: 30 })) as [Socket, Socket, Socket];
+    await vote(a);
+    await vote(a, false);
+    await vote(b);
+    expect((await state(a)).letterVotes).toHaveLength(1);
+    await sleep(40);
+    await ok(a, "room:action", { action: "tick" });
+    const now = await state(a);
+    expect(now.phase).toBe("answering");
+    expect(now.reveal).toMatchObject({ letter: "C", changedFrom: null });
+  });
+
+  it("main berdua: harus sama-sama setuju", async () => {
+    const [a, b] = (await reveal(2)) as [Socket, Socket];
+    await vote(a);
+    expect((await state(a)).reveal!.letter).toBe("B");
+    await vote(b);
+    expect((await state(a)).reveal).toMatchObject({ changedFrom: "B" });
+    expect((await state(a)).reveal!.letter).not.toBe("B");
+  });
+
+  it("huruf pengganti tidak pernah huruf yang sudah terpakai", async () => {
+    // Ronde 1: C. Ronde 2 juga jatuh di C, jadi lompat ke D; penggantinya bukan C atau D.
+    const sockets = await reveal(3, { revealMs: 1, answerMs: 1, votingMs: 1, resultMs: 1 });
+    const [a] = sockets as [Socket];
+    for (let i = 0; i < 4; i++) {
+      await sleep(10);
+      await call(a, "room:action", { action: "tick" }); // reveal -> answering -> result -> ronde 2
+    }
+    expect((await state(a)).phase).toBe("picking");
+    for (const s of sockets) await ok(s, "room:action", { action: "pick", payload: { value: 1 } });
+    expect((await state(a)).reveal).toMatchObject({ letter: "D", skippedFrom: "C" });
+    await vote(sockets[0]!);
+    await vote(sockets[1]!);
+    const now = await state(a);
+    expect(now.reveal!.changedFrom).toBe("D");
+    expect(["C", "D"]).not.toContain(now.reveal!.letter);
+    expect(now.usedLetters).toEqual(["C", "D", now.reveal!.letter]);
+  });
+
+  it("di luar fase reveal ditolak", async () => {
+    const [a] = (await reveal(2, { revealMs: 1 })) as [Socket, Socket];
+    await sleep(10);
+    await ok(a, "room:action", { action: "tick" });
+    expect(await vote(a)).toMatchObject({ ok: false, error: { code: "WRONG_PHASE" } });
   });
 });
