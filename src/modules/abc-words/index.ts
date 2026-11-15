@@ -21,11 +21,15 @@ import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from
 export const ROOM_TYPE = "abc-words";
 export const MAX_ROUNDS = 10;
 export const MAX_PLAYERS = 8;
-export const MIN_PLAYERS = 2;
+/**
+ * Minimal 3: dengan 2 pemain penilainya hanya satu orang, jadi satu tolakan sudah cukup
+ * untuk menggugurkan jawaban lawan dengan sengaja.
+ */
+export const MIN_PLAYERS = 3;
 /** Jatah menolak jawaban per pemain per permainan. Tolakan yang terbukti benar dikembalikan. */
 export const MAX_REJECTIONS = 3;
-/** Game 2 pemain: satu tolakan langsung menggugurkan jawaban, jadi jatahnya lebih kecil. */
-export const TWO_PLAYER_REJECTIONS = 1;
+/** Jawaban hanya bisa gugur kalau ditolak minimal sekian pemain. */
+export const MIN_REJECTIONS_TO_FAIL = 2;
 /** Alasan wajib saat menolak jawaban; ditampilkan ke semua pemain. */
 export const REJECT_REASONS = ["off-category", "misspelled", "not-a-word"] as const;
 export type RejectReason = (typeof REJECT_REASONS)[number];
@@ -383,11 +387,12 @@ export function createAbcWordsModule(
   }
 
   /**
-   * Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya.
+   * Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya, dan minimal 2 orang:
+   * selama ada pemain yang putus (masa tunggu reconnect) satu orang tetap tidak bisa menggugurkan sendirian.
    * Poin (lihat `POINTS`): lolos +1, gugur -2, tidak menjawab -1, menolak sendirian jawaban yang
-   * tetap lolos -1 setelah dua peringatan (hanya game 3 pemain atau lebih). Skor tidak turun di bawah 0.
+   * tetap lolos -1 setelah dua peringatan (hanya kalau ada minimal 2 penilai online). Skor tidak turun di bawah 0.
    * Penolak jawaban yang gugur mendapat jatah tolaknya kembali kalau ada pemain lain yang ikut menolak;
-   * penolak jawaban yang lolos tidak. Tolakan sepihak (game 2 pemain) tidak dikembalikan.
+   * penolak jawaban yang lolos tidak.
    */
   function showResult(ctx: Ctx): void {
     const { state, members } = ctx.room;
@@ -403,7 +408,7 @@ export function createAbcWordsModule(
     for (const answer of state.answers) {
       const voters = online.filter((id) => id !== answer.userId);
       const counted = answer.rejectedBy.filter((r) => voters.includes(r.userId));
-      answer.accepted = counted.length * 2 <= voters.length;
+      answer.accepted = counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
       answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : POINTS.rejected);
 
       if (!answer.accepted && counted.length >= 2) {
@@ -634,8 +639,7 @@ export function createAbcWordsModule(
           }
 
           room.state.endedReason = null;
-          const players = room.members.filter((m) => m.isConnected).length;
-          room.state.rejectionLimit = players === 2 ? TWO_PLAYER_REJECTIONS : MAX_REJECTIONS;
+          room.state.rejectionLimit = MAX_REJECTIONS;
           ctx.setLocked(true); // pemain baru tidak bisa masuk selama permainan
           pushMessage(ctx, { userId: null, name: "system", text: "Permainan dimulai" });
           startRound(ctx, 1);
