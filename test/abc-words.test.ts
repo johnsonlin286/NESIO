@@ -1397,8 +1397,8 @@ describe("abc-words: AFK", () => {
 describe("abc-words: voting ganti huruf", () => {
   type Socket = Parameters<typeof ok>[0];
   const state = async (socket: Socket) => (await ok<GameRoom>(socket, "room:sync")).state;
-  const vote = (socket: Socket, want = true) =>
-    call(socket, "room:action", { action: "changeLetter", payload: { want } });
+  const vote = (socket: Socket, choice: "change" | "keep" | null = "change") =>
+    call(socket, "room:action", { action: "changeLetter", payload: { choice } });
 
   /** `players` pemain memilih angka 1, jadi hurufnya = huruf ke-`players` (3 -> C). Berhenti di fase reveal. */
   async function reveal(players: number, timing: Parameters<typeof createAbcWordsModule>[0] = {}) {
@@ -1453,6 +1453,60 @@ describe("abc-words: voting ganti huruf", () => {
     });
   });
 
+  it("separuh atau lebih memilih tetap: langsung mulai menjawab tanpa menunggu waktu habis", async () => {
+    const [a, b, c] = (await reveal(3)) as [Socket, Socket, Socket];
+    await vote(a, "keep");
+    expect((await state(a)).phase).toBe("reveal"); // 1 dari 3: penggantian masih mungkin
+    await vote(b, "keep"); // 2 dari 3: penggantian butuh 2 suara, tinggal 1 pemain
+    const now = await state(a);
+    expect(now.phase).toBe("answering");
+    expect(now.reveal).toMatchObject({ letter: "C", changedFrom: null });
+    expect(await vote(c)).toMatchObject({ ok: false, error: { code: "WRONG_PHASE" } });
+  });
+
+  it("pilihan bisa dipindah dari tetap ke ganti", async () => {
+    const [a, b] = (await reveal(4)) as [Socket, Socket, Socket, Socket];
+    await vote(a, "keep");
+    await vote(a, "change");
+    await vote(b, "keep");
+    const now = await state(a);
+    expect(now.phase).toBe("reveal"); // 1 ganti, 1 tetap dari 4: belum pasti
+    expect(now.letterVotes).toHaveLength(1);
+    expect(now.letterKeeps).toHaveLength(1);
+  });
+
+  it("kecepatan menjawab: dicatat per jawaban, hanya jawaban lolos masuk rata-rata", async () => {
+    const [a, b, c] = (await reveal(3)) as [Socket, Socket, Socket];
+    await vote(a, "keep");
+    await vote(b, "keep"); // langsung ke fase menjawab
+    const act = (s: Socket, action: string, payload?: unknown) => ok(s, "room:action", { action, payload });
+    await sleep(40);
+    await act(a, "answer", { text: "Cicak" });
+    await sleep(40);
+    await act(b, "answer", { text: "Cumi" });
+    await act(c, "answer", { text: "Cacing" });
+
+    const voting = await state(a);
+    expect(voting.phase).toBe("voting");
+    const [ansA, ansB, ansC] = voting.answers;
+    expect(ansA!.ms).toBeGreaterThanOrEqual(40);
+    expect(ansB!.ms).toBeGreaterThan(ansA!.ms);
+    expect(ansC!.ms).toBeGreaterThanOrEqual(ansB!.ms);
+
+    // Jawaban B gugur (2 dari 2 penilai), jadi waktunya tidak dihitung.
+    for (const judge of [a, c]) {
+      await act(judge, "reject", { answerUserId: ansB!.userId, rejected: true, reason: "not-a-word" });
+    }
+    for (const s of [a, b, c]) await act(s, "doneVoting", { done: true });
+
+    const result = await state(a);
+    expect(result.phase).toBe("result");
+    expect(result.speed).toEqual({
+      [ansA!.userId]: { totalMs: ansA!.ms, count: 1 },
+      [ansC!.userId]: { totalMs: ansC!.ms, count: 1 },
+    });
+  });
+
   it("hanya sekali per ronde", async () => {
     const [a, b, c] = (await reveal(3)) as [Socket, Socket, Socket];
     await vote(a);
@@ -1463,7 +1517,7 @@ describe("abc-words: voting ganti huruf", () => {
   it("setuju bisa dibatalkan; tanpa mayoritas, huruf tetap", async () => {
     const [a, b] = (await reveal(3, { revealMs: 30 })) as [Socket, Socket, Socket];
     await vote(a);
-    await vote(a, false);
+    await vote(a, null);
     await vote(b);
     expect((await state(a)).letterVotes).toHaveLength(1);
     await sleep(40);

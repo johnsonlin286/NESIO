@@ -69,6 +69,8 @@ export interface Answer {
   /** Bentuk ternormalisasi untuk membandingkan jawaban; tidak dikirim ke client. */
   key: string;
   at: number;
+  /** Lama berpikir: ms sejak fase menjawab dimulai sampai jawaban diterima server. */
+  ms: number;
   /** Suara terbuka: siapa saja yang menolak jawaban ini, dan alasannya. */
   rejectedBy: { userId: string; name: string; reason: RejectReason }[];
   /** Hasil voting; `null` sampai fase voting selesai. */
@@ -146,15 +148,30 @@ export interface AbcWordsState extends ChatState {
   penalties: Penalty[];
   /** Pemain yang ingin huruf ronde ini diganti (fase reveal). */
   letterVotes: string[];
+  /** Pemain yang memilih huruf ini tetap; fase reveal selesai lebih awal kalau penggantian sudah mustahil. */
+  letterKeeps: string[];
   /** Jumlah tolakan sendirian per pemain dalam satu permainan; terlihat semua pemain. */
   loneRejections: Record<string, number>;
   /** Ronde berturut-turut tanpa memilih angka dan tanpa menjawab; lihat `AFK_ROUNDS`. */
   idleRounds: Record<string, number>;
+  /**
+   * Waktu menjawab per pemain dalam satu permainan, hanya dari jawaban yang lolos.
+   * Rata-ratanya (`totalMs / count`) memisahkan pemain dengan skor sama: yang lebih cepat di atas.
+   */
+  speed: Record<string, AnswerSpeed>;
+}
+
+export interface AnswerSpeed {
+  totalMs: number;
+  count: number;
 }
 
 export interface AbcWordsTiming {
   pickMs: number;
-  /** Lama huruf ditampilkan; selama itu pemain bisa voting "ganti huruf". */
+  /**
+   * Lama huruf ditampilkan; selama itu pemain bisa voting "ganti huruf" atau "tetap".
+   * Selesai lebih awal begitu hasil voting sudah pasti (lihat `checkLetterVote`).
+   */
   revealMs: number;
   /** Lama huruf pengganti ditampilkan sebelum menjawab dimulai. */
   changedRevealMs: number;
@@ -181,7 +198,7 @@ export interface AbcWordsTiming {
 
 const DEFAULT_TIMING: AbcWordsTiming = {
   pickMs: 10_000,
-  revealMs: 7_000,
+  revealMs: 20_000,
   changedRevealMs: 3_000,
   abandonMs: 5_000,
   answerMs: 30_000,
@@ -253,7 +270,8 @@ type RoundFields =
   | "graceUsedBy"
   | "votingDone"
   | "penalties"
-  | "letterVotes";
+  | "letterVotes"
+  | "letterKeeps";
 
 function emptyRound(): Pick<AbcWordsState, RoundFields> {
   return {
@@ -266,6 +284,7 @@ function emptyRound(): Pick<AbcWordsState, RoundFields> {
     votingDone: [],
     penalties: [],
     letterVotes: [],
+    letterKeeps: [],
   };
 }
 
@@ -299,6 +318,7 @@ function idleFields() {
     rejectionLimit: MAX_REJECTIONS,
     loneRejections: {} as Record<string, number>,
     idleRounds: {} as Record<string, number>,
+    speed: {} as Record<string, AnswerSpeed>,
     ...emptyRound(),
   };
 }
@@ -410,6 +430,11 @@ export function createAbcWordsModule(
       const counted = answer.rejectedBy.filter((r) => voters.includes(r.userId));
       answer.accepted = counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
       answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : POINTS.rejected);
+      if (answer.accepted) {
+        const speed = (state.speed[answer.userId] ??= { totalMs: 0, count: 0 });
+        speed.totalMs += answer.ms;
+        speed.count += 1;
+      }
 
       if (!answer.accepted && counted.length >= 2) {
         for (const { userId } of answer.rejectedBy) {
@@ -511,8 +536,14 @@ export function createAbcWordsModule(
     const reveal = state.reveal;
     if (state.phase !== "reveal" || !reveal || reveal.changedFrom !== null) return;
     const active = activePlayers(ctx.room).map((m) => m.userId);
+    if (active.length === 0) return;
     const votes = state.letterVotes.filter((id) => active.includes(id)).length;
-    if (active.length === 0 || votes * 2 <= active.length) return;
+    const keeps = state.letterKeeps.filter((id) => active.includes(id)).length;
+    if (votes * 2 <= active.length) {
+      // Separuh atau lebih memilih tetap: penggantian tidak mungkin lagi, jadi tidak perlu menunggu.
+      if (keeps * 2 >= active.length) startAnswering(ctx);
+      return;
+    }
 
     const old = reveal.letter;
     const unused = [...ALPHABET].filter((letter) => !state.usedLetters.includes(letter));
@@ -522,6 +553,7 @@ export function createAbcWordsModule(
     reveal.changedFrom = old;
     reveal.letter = next;
     state.letterVotes = [];
+    state.letterKeeps = [];
     setDeadline(ctx, timing.changedRevealMs);
     pushMessage(ctx, { userId: null, name: "system", text: `Huruf ${old} diganti menjadi ${next}` });
   }
@@ -710,6 +742,7 @@ export function createAbcWordsModule(
             text: displayAnswer(cleaned),
             key,
             at: now,
+            ms: now - state.answeringStartedAt!,
             rejectedBy: [],
             accepted: null,
             points: null,
@@ -757,18 +790,19 @@ export function createAbcWordsModule(
         },
       }),
 
-      /** Setuju (atau batal setuju) mengganti huruf ronde ini; lihat `checkLetterVote`. */
+      /** Memilih "ganti" atau "tetap" untuk huruf ronde ini, atau batal memilih (`null`); lihat `checkLetterVote`. */
       changeLetter: action({
-        schema: z.object({ want: z.boolean() }),
-        handler(ctx, { want }) {
+        schema: z.object({ choice: z.enum(["change", "keep"]).nullable() }),
+        handler(ctx, { choice }) {
           const { state } = ctx.room;
           const userId = ctx.sender!.userId;
           if (state.phase !== "reveal" || !state.reveal) ctx.fail("WRONG_PHASE", "Huruf hanya bisa diganti saat baru keluar");
           if (state.reveal!.changedFrom !== null) ctx.fail("ALREADY_CHANGED", "Huruf ronde ini sudah diganti sekali");
 
-          const index = state.letterVotes.indexOf(userId);
-          if (want && index < 0) state.letterVotes.push(userId);
-          if (!want && index >= 0) state.letterVotes.splice(index, 1);
+          state.letterVotes = state.letterVotes.filter((id) => id !== userId);
+          state.letterKeeps = state.letterKeeps.filter((id) => id !== userId);
+          if (choice === "change") state.letterVotes.push(userId);
+          if (choice === "keep") state.letterKeeps.push(userId);
           checkLetterVote(ctx);
         },
       }),
