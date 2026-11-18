@@ -1658,6 +1658,18 @@ describe("abc-words: jawaban terverifikasi", () => {
     ]);
   });
 
+  it("buah & sayur: buah dan sayur terverifikasi, ejaan lain juga", async () => {
+    const [a, b, c] = await answering({ category: "buah-sayur" });
+    await act(a, "answer", { text: "Cabe rawit" });
+    await act(b, "answer", { text: "Ceri" });
+    await act(c, "answer", { text: "Cumi" });
+    expect((await state(a)).answers.map((x) => [x.text, x.verified])).toEqual([
+      ["Cabe Rawit", true],
+      ["Ceri", true],
+      ["Cumi", false],
+    ]);
+  });
+
   it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
     const [a] = await answering({ category: "custom", customCategory: "Benda" });
     await act(a, "answer", { text: "Cina" });

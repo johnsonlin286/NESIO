@@ -38,8 +38,8 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 const settingsSchema = z.object({
   historyLimit: z.number().int().min(0).max(200).default(50),
-  // Negara dulu: satu-satunya kategori yang sudah punya daftar jawaban terverifikasi (lihat ./words).
-  category: z.enum(["hewan", "kota", "negara", "custom"]).default("negara"),
+  // Semua kategori tetap punya daftar jawaban terverifikasi (lihat ./words); "custom" lewat voting.
+  category: z.enum(["hewan", "kota", "negara", "buah-sayur", "custom"]).default("negara"),
   /** Dipakai kalau `category` = "custom". */
   customCategory: z.string().transform(cleanText).pipe(z.string().max(40)).default(""),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS).default(MAX_ROUNDS),
