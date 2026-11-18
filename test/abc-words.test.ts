@@ -1634,6 +1634,18 @@ describe("abc-words: jawaban terverifikasi", () => {
     expect(now.answers.every((x) => x.verified && x.accepted)).toBe(true);
   });
 
+  it("kota: nama Indonesia dan kabupaten terverifikasi, nama Inggris tidak", async () => {
+    const [a, b, c] = await answering({ category: "kota" });
+    await act(a, "answer", { text: "Cirebon" });
+    await act(b, "answer", { text: "Cianjur" }); // dari daftar kabupaten
+    await act(c, "answer", { text: "Cairo" }); // nama Indonesianya Kairo
+    expect((await state(a)).answers.map((x) => [x.text, x.verified])).toEqual([
+      ["Cirebon", true],
+      ["Cianjur", true],
+      ["Cairo", false],
+    ]);
+  });
+
   it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
     const [a] = await answering({ category: "custom", customCategory: "Benda" });
     await act(a, "answer", { text: "Cina" });
