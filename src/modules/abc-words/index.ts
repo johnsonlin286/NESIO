@@ -6,6 +6,7 @@ import { cleanText } from "../../lib/text.js";
 import { chatSendSchema, pushMessage, type ChatState } from "../chat/index.js";
 import { createProfanityChecker } from "../chat/profanity.js";
 import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from "../chat/spam-guard.js";
+import { isVerifiedAnswer } from "./words/index.js";
 
 /**
  * Game ABC Lima Dasar: semua pemain menunjukkan angka 1–10, jumlahnya menjadi huruf,
@@ -37,7 +38,8 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 const settingsSchema = z.object({
   historyLimit: z.number().int().min(0).max(200).default(50),
-  category: z.enum(["bebas", "hewan", "merek", "kota", "negara", "custom"]).default("bebas"),
+  // Negara dulu: satu-satunya kategori yang sudah punya daftar jawaban terverifikasi (lihat ./words).
+  category: z.enum(["hewan", "kota", "negara", "custom"]).default("negara"),
   /** Dipakai kalau `category` = "custom". */
   customCategory: z.string().transform(cleanText).pipe(z.string().max(40)).default(""),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS).default(MAX_ROUNDS),
@@ -71,6 +73,8 @@ export interface Answer {
   at: number;
   /** Lama berpikir: ms sejak fase menjawab dimulai sampai jawaban diterima server. */
   ms: number;
+  /** Ada di daftar jawaban kategori ini (lihat ./words): langsung lolos, tidak bisa ditolak. */
+  verified: boolean;
   /** Suara terbuka: siapa saja yang menolak jawaban ini, dan alasannya. */
   rejectedBy: { userId: string; name: string; reason: RejectReason }[];
   /** Hasil voting; `null` sampai fase voting selesai. */
@@ -222,8 +226,8 @@ export const AFK_ROUNDS = 2;
 /** Lihat `AbcWordsTiming.retryWindowMs`. */
 export const ANSWER_RETRY_LIMIT = 3;
 
-const ANSWER_MIN = 2;
-const ANSWER_MAX = 40;
+export const ANSWER_MIN = 2;
+export const ANSWER_MAX = 40;
 
 type Ctx = ModuleContext<AbcWordsState, AbcWordsSettings>;
 
@@ -297,9 +301,14 @@ function activePlayers(room: Room<AbcWordsState, AbcWordsSettings>) {
   return room.members.filter((m) => m.isConnected && !isAfk(room.state, m.userId));
 }
 
-/** Pemain aktif yang punya jawaban orang lain untuk dinilai. */
+/** Jawaban terverifikasi tidak dinilai; hanya sisanya yang masuk voting. */
+function answersToJudge(room: Room<AbcWordsState, AbcWordsSettings>) {
+  return room.state.answers.filter((a) => !a.verified);
+}
+
+/** Pemain aktif yang punya jawaban orang lain (yang belum terverifikasi) untuk dinilai. */
 function judgesOf(room: Room<AbcWordsState, AbcWordsSettings>): string[] {
-  const { answers } = room.state;
+  const answers = answersToJudge(room);
   return activePlayers(room)
     .filter((m) => answers.some((a) => a.userId !== m.userId))
     .map((m) => m.userId);
@@ -398,7 +407,8 @@ export function createAbcWordsModule(
 
   function finishAnswering(ctx: Ctx): void {
     const { state } = ctx.room;
-    if (state.answers.length === 0) {
+    // Tidak ada yang perlu dinilai (tidak ada jawaban, atau semuanya terverifikasi): langsung hasil.
+    if (answersToJudge(ctx.room).length === 0) {
       showResult(ctx);
       return;
     }
@@ -428,7 +438,8 @@ export function createAbcWordsModule(
     for (const answer of state.answers) {
       const voters = online.filter((id) => id !== answer.userId);
       const counted = answer.rejectedBy.filter((r) => voters.includes(r.userId));
-      answer.accepted = counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
+      answer.accepted =
+        answer.verified || counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
       answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : POINTS.rejected);
       if (answer.accepted) {
         const speed = (state.speed[answer.userId] ??= { totalMs: 0, count: 0 });
@@ -743,6 +754,7 @@ export function createAbcWordsModule(
             key,
             at: now,
             ms: now - state.answeringStartedAt!,
+            verified: isVerifiedAnswer(ctx.room.settings.category, key),
             rejectedBy: [],
             accepted: null,
             points: null,
@@ -771,6 +783,7 @@ export function createAbcWordsModule(
           if (answerUserId === sender.userId) ctx.fail("OWN_ANSWER", "Jawaban sendiri tidak bisa ditolak");
           const answer = state.answers.find((a) => a.userId === answerUserId);
           if (!answer) return ctx.fail("ANSWER_NOT_FOUND", "Jawaban tidak ditemukan");
+          if (answer.verified) ctx.fail("VERIFIED_ANSWER", "Jawaban ini sudah terverifikasi, tidak bisa ditolak");
 
           const index = answer.rejectedBy.findIndex((r) => r.userId === sender.userId);
           const used = state.rejectionsUsed[sender.userId] ?? 0;

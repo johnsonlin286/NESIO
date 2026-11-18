@@ -39,7 +39,7 @@ describe("abc-words: ruang tunggu", () => {
     const { room } = await setup();
     expect(room.state.phase).toBe("waiting");
     expect(room.maxMembers).toBe(8);
-    expect(room.settings).toEqual({ historyLimit: 50, category: "bebas", customCategory: "", maxRounds: 10 });
+    expect(room.settings).toEqual({ historyLimit: 50, category: "negara", customCategory: "", maxRounds: 10 });
   });
 
   it("room tidak bisa dibuat untuk kurang dari 3 pemain", async () => {
@@ -54,11 +54,11 @@ describe("abc-words: ruang tunggu", () => {
 
   it("host mengubah konfigurasi dan pemain lain langsung menerimanya", async () => {
     const { host, guest } = await setup();
-    const received = waitFor<GameRoom>(guest, "room:state", (r) => r.settings.category === "merek");
+    const received = waitFor<GameRoom>(guest, "room:state", (r) => r.settings.category === "kota");
 
-    await ok(host, "room:update", { settings: { category: "merek", maxRounds: 5 } });
+    await ok(host, "room:update", { settings: { category: "kota", maxRounds: 5 } });
 
-    expect((await received).settings).toMatchObject({ category: "merek", maxRounds: 5 });
+    expect((await received).settings).toMatchObject({ category: "kota", maxRounds: 5 });
   });
 
   it("perubahan sebagian tidak menghapus konfigurasi lain", async () => {
@@ -1561,5 +1561,86 @@ describe("abc-words: voting ganti huruf", () => {
     await sleep(10);
     await ok(a, "room:action", { action: "tick" });
     expect(await vote(a)).toMatchObject({ ok: false, error: { code: "WRONG_PHASE" } });
+  });
+});
+
+describe("abc-words: jawaban terverifikasi", () => {
+  type Socket = Parameters<typeof ok>[0];
+  const state = async (socket: Socket) => (await ok<GameRoom>(socket, "room:sync")).state;
+  const act = (socket: Socket, action: string, payload?: unknown) => ok(socket, "room:action", { action, payload });
+
+  /** 3 pemain memilih 1, jadi hurufnya C; berhenti di fase menjawab. */
+  async function answering(settings: { category: string; customCategory?: string }) {
+    const module = createAbcWordsModule({ pickMs: 5000, revealMs: 5000, answerMs: 5000, minAnswerMs: 0 });
+    const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" }, [module]);
+    const sockets: Socket[] = [await connect(url, { name: "Host" })];
+    const room = await ok<GameRoom>(sockets[0]!, "room:create", {
+      type: "abc-words",
+      isPublic: true,
+      settings,
+    });
+    for (const name of ["Tamu1", "Tamu2"]) {
+      const guest = await connect(url, { name });
+      await ok(guest, "room:join", { roomId: room.id });
+      sockets.push(guest);
+    }
+    await act(sockets[0]!, "start");
+    for (const s of sockets) await act(s, "pick", { value: 1 });
+    // Dua "tetap" dari tiga sudah memulai fase menjawab.
+    for (const s of sockets.slice(0, 2)) await act(s, "changeLetter", { choice: "keep" });
+    expect((await state(sockets[0]!)).phase).toBe("answering");
+    return sockets as [Socket, Socket, Socket];
+  }
+
+  it("jawaban di daftar kategori ditandai, tidak bisa ditolak, dan lolos; sisanya tetap di-voting", async () => {
+    const [a, b, c] = await answering({ category: "negara" });
+    await act(a, "answer", { text: "Cina" });
+    await act(b, "answer", { text: "ceKO" });
+    await act(c, "answer", { text: "Cumi" });
+
+    const voting = await state(a);
+    expect(voting.phase).toBe("voting");
+    expect(voting.answers.map((x) => [x.text, x.verified])).toEqual([
+      ["Cina", true],
+      ["Ceko", true],
+      ["Cumi", false],
+    ]);
+    const cina = voting.answers[0]!;
+    const reject = { answerUserId: cina.userId, rejected: true, reason: "not-a-word" };
+    expect(await call(c, "room:action", { action: "reject", payload: reject })).toMatchObject({
+      ok: false,
+      error: { code: "VERIFIED_ANSWER" },
+    });
+    // Hanya A dan B yang punya jawaban untuk dinilai (milik C); C tidak ditunggu.
+    expect(await call(c, "room:action", { action: "doneVoting", payload: { done: true } })).toMatchObject({
+      ok: false,
+      error: { code: "NOTHING_TO_JUDGE" },
+    });
+    await act(a, "doneVoting", { done: true });
+    await act(b, "doneVoting", { done: true });
+
+    const result = await state(a);
+    expect(result.phase).toBe("result");
+    expect(result.answers.map((x) => x.accepted)).toEqual([true, true, true]);
+  });
+
+  it("semua jawaban terverifikasi: voting dilewati", async () => {
+    const [a, b, c] = await answering({ category: "negara" });
+    await act(a, "answer", { text: "Cina" });
+    await act(b, "answer", { text: "Ceko" });
+    await act(c, "answer", { text: "Chili" });
+    const now = await state(a);
+    expect(now.phase).toBe("result");
+    expect(now.answers.every((x) => x.verified && x.accepted)).toBe(true);
+  });
+
+  it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
+    const [a] = await answering({ category: "custom", customCategory: "Benda" });
+    await act(a, "answer", { text: "Cina" });
+    const [x, y] = await answering({ category: "negara" });
+    await act(x, "answer", { text: "China" });
+    await act(y, "answer", { text: "Cile" });
+    expect((await state(a)).answers[0]!.verified).toBe(false);
+    expect((await state(x)).answers.map((ans) => ans.verified)).toEqual([false, true]);
   });
 });
