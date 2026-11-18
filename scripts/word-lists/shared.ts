@@ -38,6 +38,11 @@ export function toKeys(label: string): string[] {
   return [...keys];
 }
 
+/** Indonesian names are often written as one word: "tanjung balai" also "tanjungbalai", "kura kura" also "kurakura". */
+export function withJoined(keys: string[]): string[] {
+  return keys.flatMap((k) => (k.includes(" ") ? [k, k.replace(/ /g, "")] : [k]));
+}
+
 /** Writes `words/<name>.json` (sorted, unique) and prints a short summary instead of the list. */
 export function writeWordList(name: string, list: { source: string; license: string; words: string[] }): void {
   const words = [...new Set(list.words)].sort();

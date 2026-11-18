@@ -13,7 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { toKeys, writeWordList } from "./shared.js";
+import { toKeys, withJoined, writeWordList } from "./shared.js";
 
 const dir = process.argv[2];
 if (!dir) throw new Error("Pakai: npx tsx scripts/word-lists/kota.ts <folder berisi cities15000.txt dan admin2Codes.txt>");
@@ -75,11 +75,6 @@ function indonesianRegionName(name: string): string {
   const direction = n.match(/^(North|South|East|West|Central)\s+(.*)$/);
   if (direction) n = `${direction[2]} ${DIRECTIONS[direction[1]!]}`;
   return n;
-}
-
-/** Nama Indonesia sering ditulis gabung: "Tanjung Balai" juga "tanjungbalai", dan sebaliknya. */
-function withJoined(keys: string[]): string[] {
-  return keys.flatMap((k) => (k.includes(" ") ? [k, k.replace(/ /g, "")] : [k]));
 }
 
 const keys = new Set<string>();

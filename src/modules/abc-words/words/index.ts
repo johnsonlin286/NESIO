@@ -3,12 +3,14 @@
  * Jawaban yang ada di daftar langsung lolos dan tidak bisa ditolak; yang tidak ada tetap
  * boleh, lewat voting seperti biasa. Kategori tanpa daftar (mis. "custom") selalu lewat voting.
  */
+import hewan from "./hewan.json" with { type: "json" };
 import kota from "./kota.json" with { type: "json" };
 import negara from "./negara.json" with { type: "json" };
 
 const LISTS: Readonly<Record<string, ReadonlySet<string>>> = {
   negara: new Set(negara.words),
   kota: new Set(kota.words),
+  hewan: new Set(hewan.words),
 };
 
 /** Kategori yang punya daftar jawaban terverifikasi. */

@@ -1646,6 +1646,18 @@ describe("abc-words: jawaban terverifikasi", () => {
     ]);
   });
 
+  it("hewan: nama Indonesia (juga kata ulang tanpa tanda hubung) terverifikasi, bukan nama hewan tidak", async () => {
+    const [a, b, c] = await answering({ category: "hewan" });
+    await act(a, "answer", { text: "Cicak" });
+    await act(b, "answer", { text: "Cumi cumi" });
+    await act(c, "answer", { text: "Cat" }); // bahasa Inggris
+    expect((await state(a)).answers.map((x) => [x.text, x.verified])).toEqual([
+      ["Cicak", true],
+      ["Cumi Cumi", true],
+      ["Cat", false],
+    ]);
+  });
+
   it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
     const [a] = await answering({ category: "custom", customCategory: "Benda" });
     await act(a, "answer", { text: "Cina" });
