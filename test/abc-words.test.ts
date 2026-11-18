@@ -54,11 +54,11 @@ describe("abc-words: ruang tunggu", () => {
 
   it("host mengubah konfigurasi dan pemain lain langsung menerimanya", async () => {
     const { host, guest } = await setup();
-    const received = waitFor<GameRoom>(guest, "room:state", (r) => r.settings.category === "film");
+    const received = waitFor<GameRoom>(guest, "room:state", (r) => r.settings.category === "merek");
 
-    await ok(host, "room:update", { settings: { category: "film", maxRounds: 5 } });
+    await ok(host, "room:update", { settings: { category: "merek", maxRounds: 5 } });
 
-    expect((await received).settings).toMatchObject({ category: "film", maxRounds: 5 });
+    expect((await received).settings).toMatchObject({ category: "merek", maxRounds: 5 });
   });
 
   it("perubahan sebagian tidak menghapus konfigurasi lain", async () => {

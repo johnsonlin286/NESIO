@@ -37,7 +37,7 @@ const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 const settingsSchema = z.object({
   historyLimit: z.number().int().min(0).max(200).default(50),
-  category: z.enum(["bebas", "hewan", "lagu", "film", "negara", "custom"]).default("bebas"),
+  category: z.enum(["bebas", "hewan", "merek", "kota", "negara", "custom"]).default("bebas"),
   /** Dipakai kalau `category` = "custom". */
   customCategory: z.string().transform(cleanText).pipe(z.string().max(40)).default(""),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS).default(MAX_ROUNDS),
