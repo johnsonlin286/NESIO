@@ -223,5 +223,30 @@
   "yunani",
   "zambia",
   "zimbabwe"
- ]
+ ],
+ "same": {
+  "afghanistan": "afganistan",
+  "amerika": "amerika serikat",
+  "as": "amerika serikat",
+  "bosnia": "bosnia dan herzegovina",
+  "britania raya": "inggris raya",
+  "brunei darussalam": "brunei",
+  "chili": "cile",
+  "cina": "tiongkok",
+  "emirat arab": "uni emirat arab",
+  "inggris": "inggris raya",
+  "korea": "korea selatan",
+  "korsel": "korea selatan",
+  "korut": "korea utara",
+  "makedonia": "makedonia utara",
+  "republik ceko": "ceko",
+  "republik demokratik kongo": "kongo kinshasa",
+  "republik kongo": "kongo brazzaville",
+  "romania": "rumania",
+  "rrc": "tiongkok",
+  "saudi": "arab saudi",
+  "timor timur": "timor leste",
+  "turkiye": "turki",
+  "uea": "uni emirat arab"
+ }
 }

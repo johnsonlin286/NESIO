@@ -66,15 +66,36 @@ if (UN_MEMBERS.length !== 193 || new Set(codes).size !== codes.length) {
 const id = new Intl.DisplayNames(["id"], { type: "region", fallback: "none" });
 
 const keys = new Set<string>();
+/** Negara mana saja yang memakai sebuah kunci; "kongo" dipakai dua negara. */
+const codesOf = new Map<string, Set<string>>();
+/** Nama utama (nama CLDR/override) tiap negara. */
+const mainKey = new Map<string, string>();
 for (const code of codes) {
   const name = OVERRIDES[code] ?? id.of(code);
   if (!name) throw new Error(`Tidak ada nama CLDR untuk ${code}`);
+  mainKey.set(code, toKeys(name)[0]!);
   const labels = [name, ...(ALIASES[code] ?? [])];
-  for (const label of labels) for (const key of toKeys(label!)) keys.add(key);
+  for (const label of labels) {
+    for (const key of toKeys(label!)) {
+      keys.add(key);
+      codesOf.set(key, (codesOf.get(key) ?? new Set()).add(code));
+    }
+  }
 }
+
+// Nama lain dari negara yang sama dihitung jawaban kembar ("Amerika" = "Amerika Serikat" = "AS").
+// Kunci yang dipakai lebih dari satu negara ("kongo") tidak dipetakan: tidak jelas negara yang mana.
+const same: Record<string, string> = {};
+for (const [key, owners] of codesOf) {
+  if (owners.size !== 1) continue;
+  const main = mainKey.get([...owners][0]!)!;
+  if (key !== main) same[key] = main;
+}
+console.log(`nama lain: ${Object.entries(same).map(([k, v]) => `${k}=${v}`).join(", ")}`);
 
 writeWordList("negara", {
   source: `Unicode CLDR ${process.versions.cldr} via Node.js Intl.DisplayNames (id) + manual overrides and aliases`,
   license: "Unicode License v3 (CLDR); aliases written for this project",
   words: [...keys],
+  same,
 });

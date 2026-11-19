@@ -18,7 +18,20 @@ const LISTS: Readonly<Record<string, ReadonlySet<string>>> = {
 /** Kategori yang punya daftar jawaban terverifikasi. */
 export const VERIFIED_CATEGORIES = Object.keys(LISTS);
 
+/** Nama lain -> nama utama per kategori ("amerika" -> "amerika serikat"); dibuat oleh script daftarnya. */
+const SAME: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  negara: negara.same,
+};
+
 /** `key` adalah kunci jawaban (lihat `answerKey`). */
 export function isVerifiedAnswer(category: string, key: string): boolean {
   return LISTS[category]?.has(key) ?? false;
+}
+
+/**
+ * Bentuk untuk mencari jawaban kembar: nama lain diganti nama utamanya, dan spasi diabaikan.
+ * "Amerika", "AS" dan "Amerika Serikat" sama; "Tanjung Balai" sama dengan "Tanjungbalai".
+ */
+export function sameAnswerKey(category: string, key: string): string {
+  return (SAME[category]?.[key] ?? key).replace(/ /g, "");
 }

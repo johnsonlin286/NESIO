@@ -6,7 +6,7 @@ import { cleanText } from "../../lib/text.js";
 import { chatSendSchema, pushMessage, type ChatState } from "../chat/index.js";
 import { createProfanityChecker } from "../chat/profanity.js";
 import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from "../chat/spam-guard.js";
-import { isVerifiedAnswer } from "./words/index.js";
+import { isVerifiedAnswer, sameAnswerKey } from "./words/index.js";
 
 /**
  * Game ABC Lima Dasar: semua pemain menunjukkan angka 1–10, jumlahnya menjadi huruf,
@@ -68,7 +68,7 @@ export interface Answer {
   userId: string;
   name: string;
   text: string;
-  /** Bentuk ternormalisasi untuk membandingkan jawaban; tidak dikirim ke client. */
+  /** Untuk mencari jawaban kembar (lihat `sameAnswerKey`); tidak dikirim ke client. */
   key: string;
   at: number;
   /** Lama berpikir: ms sejak fase menjawab dimulai sampai jawaban diterima server. */
@@ -737,7 +737,9 @@ export function createAbcWordsModule(
             ctx.fail("WRONG_LETTER", `Jawaban harus berawalan huruf ${letter}`, pause);
           }
 
-          const existing = state.answers.find((a) => a.key === key);
+          const { category } = ctx.room.settings;
+          const sameKey = sameAnswerKey(category, key);
+          const existing = state.answers.find((a) => a.key === sameKey);
           if (existing) {
             // Keduluan tidak dihitung: itu sial, bukan menebak-nebak.
             const nearTie = now - existing.at < timing.nearTieMs && !state.graceUsedBy.includes(sender.userId);
@@ -751,10 +753,10 @@ export function createAbcWordsModule(
             userId: sender.userId,
             name: sender.name,
             text: displayAnswer(cleaned),
-            key,
+            key: sameKey,
             at: now,
             ms: now - state.answeringStartedAt!,
-            verified: isVerifiedAnswer(ctx.room.settings.category, key),
+            verified: isVerifiedAnswer(category, key),
             rejectedBy: [],
             accepted: null,
             points: null,
