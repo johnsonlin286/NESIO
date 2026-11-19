@@ -23,14 +23,20 @@ type ClientState = Omit<AbcWordsState, "picks" | "deadline"> & {
 };
 type GameRoom = RoomView<ClientState, AbcWordsSettings>;
 
+/** Masuk room lalu menekan "Siap": host baru bisa memulai kalau semua pemain online lain siap. */
+async function joinReady(socket: Parameters<typeof ok>[0], roomId: string) {
+  await ok(socket, "room:join", { roomId });
+  await ok(socket, "room:action", { action: "ready", payload: { ready: true } });
+}
+
 async function setup() {
   const { url } = await startServer();
   const host = await connect(url, { name: "Host" });
   const guest = await connect(url, { name: "Tamu" });
   const guest2 = await connect(url, { name: "Tamu2" });
   const room = await ok<GameRoom>(host, "room:create", { type: "abc-words", isPublic: true });
-  await ok(guest, "room:join", { roomId: room.id });
-  await ok(guest2, "room:join", { roomId: room.id });
+  await joinReady(guest, room.id);
+  await joinReady(guest2, room.id);
   return { url, host, guest, guest2, room };
 }
 
@@ -156,7 +162,7 @@ describe("abc-words: memulai permainan", () => {
       error: { code: "NOT_ENOUGH_PLAYERS" },
     });
     // Berdua juga belum cukup: penilai jawaban hanya satu orang.
-    await ok(guest, "room:join", { roomId: room.id });
+    await joinReady(guest, room.id);
     expect(await call(host, "room:action", { action: "start" })).toMatchObject({
       ok: false,
       error: { code: "NOT_ENOUGH_PLAYERS" },
@@ -169,8 +175,8 @@ describe("abc-words: memulai permainan", () => {
     const guest = await connect(url, { name: "Tamu" });
     const guest2 = await connect(url, { name: "Tamu2" });
     const room = await ok<GameRoom>(host, "room:create", { type: "abc-words" });
-    await ok(guest, "room:join", { roomId: room.id });
-    await ok(guest2, "room:join", { roomId: room.id });
+    await joinReady(guest, room.id);
+    await joinReady(guest2, room.id);
     guest2.disconnect();
     await sleep(30);
     expect(await call(host, "room:action", { action: "start" })).toMatchObject({
@@ -247,7 +253,7 @@ describe("abc-words: pilih angka dan huruf", () => {
     const guests = [];
     for (let i = 0; i < players - 1; i++) {
       const guest = await connect(url, { name: `Tamu${i}` });
-      await ok(guest, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
       guests.push(guest);
     }
     await ok(host, "room:action", { action: "start" });
@@ -409,8 +415,8 @@ describe("abc-words: pilih angka dan huruf", () => {
       const guest = await connect(url, { name: "Tamu" });
       const guest2 = await connect(url, { name: "Tamu2" });
       const room = await ok<GameRoom>(host, "room:create", { type: "abc-words" });
-      await ok(guest, "room:join", { roomId: room.id });
-      await ok(guest2, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
+      await joinReady(guest2, room.id);
 
       const revealed = waitFor<GameRoom>(guest, "room:state", (r) => r.state.phase === "reveal", 2000);
       const nextRound = waitFor<GameRoom>(guest, "room:state", (r) => r.state.round === 2, 2000);
@@ -437,7 +443,7 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
     const guests = [];
     for (let i = 0; i < players - 1; i++) {
       const guest = await connect(url, { name: `Tamu${i}` });
-      await ok(guest, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
       guests.push(guest);
     }
     await ok(host, "room:action", { action: "start" });
@@ -497,6 +503,8 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
     const { host, guests } = await playing(60, 3);
     await ok(host, "room:action", { action: "end" });
     expect((await ok<GameRoom>(host, "room:sync")).state.endedReason).toBe("Host mengakhiri permainan");
+    // "Siap" direset tiap kembali ke ruang tunggu.
+    for (const g of guests) await ok(g, "room:action", { action: "ready", payload: { ready: true } });
     await ok(host, "room:action", { action: "start" });
     expect((await ok<GameRoom>(guests[0]!, "room:sync")).state.endedReason).toBeNull();
   });
@@ -517,8 +525,8 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
       const guest = await connect(url, { name: "Tamu" });
       const guest2 = await connect(url, { name: "Tamu2" });
       const room = await ok<GameRoom>(host, "room:create", { type: "abc-words" });
-      await ok(guest, "room:join", { roomId: room.id });
-      await ok(guest2, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
+      await joinReady(guest2, room.id);
       await ok(host, "room:action", { action: "start" });
 
       const ended = waitFor<GameRoom>(host, "room:state", (r) => r.state.phase === "waiting", 2000);
@@ -543,8 +551,8 @@ describe("abc-words: host offline", () => {
     const first = await connect(url, { name: "Pertama" });
     const second = await connect(url, { name: "Kedua" });
     const created = await ok<GameRoom>(host, "room:create", { type: "abc-words", isPublic: true });
-    await ok(first, "room:join", { roomId: created.id });
-    await ok(second, "room:join", { roomId: created.id });
+    await joinReady(first, created.id);
+    await joinReady(second, created.id);
     return { url, server, host, first, second };
   }
 
@@ -629,7 +637,7 @@ describe("abc-words: menjawab", () => {
     const room = await ok<GameRoom>(sockets[0]!, "room:create", { type: "abc-words", isPublic: true });
     for (let i = 1; i < players; i++) {
       const guest = await connect(url, { name: `Tamu${i}` });
-      await ok(guest, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
       sockets.push(guest);
     }
     await ok(sockets[0]!, "room:action", { action: "start" });
@@ -855,7 +863,7 @@ describe("abc-words: voting dan skor", () => {
     const room = await ok<GameRoom>(sockets[0]!, "room:create", { type: "abc-words", isPublic: true, settings });
     for (let i = 1; i < words.length; i++) {
       const socket = await connect(url, { name: `Pemain${i}` });
-      await ok(socket, "room:join", { roomId: room.id });
+      await joinReady(socket, room.id);
       sockets.push(socket);
     }
     await ok(sockets[0]!, "room:action", { action: "start" });
@@ -1241,7 +1249,7 @@ describe("abc-words: spam chat", () => {
     const a = await connect(url, { name: "Spammer" });
     const b = await connect(url, { name: "Sopan" });
     const room = await ok<GameRoom>(a, "room:create", { type: "abc-words", isPublic: true });
-    await ok(b, "room:join", { roomId: room.id });
+    await joinReady(b, room.id);
     const send = (socket: typeof a, text: string) => call(socket, "room:action", { action: "send", payload: { text } });
 
     await send(a, "spam");
@@ -1269,7 +1277,7 @@ describe("abc-words: spam chat", () => {
     const a = await connect(url, { name: "Kasar" });
     const b = await connect(url, { name: "Sopan" });
     const room = await ok<GameRoom>(a, "room:create", { type: "abc-words", isPublic: true });
-    await ok(b, "room:join", { roomId: room.id });
+    await joinReady(b, room.id);
 
     const refused = await call(a, "room:action", { action: "send", payload: { text: "dasar g0bl0k" } });
     expect(refused).toMatchObject({ ok: false, error: { code: "CHAT_PROFANITY" } });
@@ -1314,7 +1322,7 @@ describe("abc-words: AFK", () => {
     const room = await ok<GameRoom>(sockets[0]!, "room:create", { type: "abc-words", isPublic: true, settings: {} });
     for (const name of ["Aktif1", "Diam"]) {
       const socket = await connect(url, { name });
-      await ok(socket, "room:join", { roomId: room.id });
+      await joinReady(socket, room.id);
       sockets.push(socket);
     }
     await act(sockets[0]!, "start");
@@ -1415,7 +1423,7 @@ describe("abc-words: voting ganti huruf", () => {
     const room = await ok<GameRoom>(sockets[0]!, "room:create", { type: "abc-words", isPublic: true });
     for (let i = 1; i < players; i++) {
       const guest = await connect(url, { name: `Tamu${i}` });
-      await ok(guest, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
       sockets.push(guest);
     }
     await ok(sockets[0]!, "room:action", { action: "start" });
@@ -1581,7 +1589,7 @@ describe("abc-words: jawaban terverifikasi", () => {
     });
     for (const name of ["Tamu1", "Tamu2"]) {
       const guest = await connect(url, { name });
-      await ok(guest, "room:join", { roomId: room.id });
+      await joinReady(guest, room.id);
       sockets.push(guest);
     }
     await act(sockets[0]!, "start");
@@ -1693,3 +1701,80 @@ describe("abc-words: jawaban terverifikasi", () => {
     expect((await state(x)).answers.map((ans) => ans.verified)).toEqual([false, true]);
   });
 });
+
+describe("abc-words: siap, panggil, dan keluarkan pemain", () => {
+  type Socket = Parameters<typeof ok>[0];
+  const act = (socket: Socket, action: string, payload?: unknown) => call(socket, "room:action", { action, payload });
+  const state = async (socket: Socket) => (await ok<GameRoom>(socket, "room:sync")).state;
+  const idOf = (socket: Socket) => (socket as unknown as { session: { userId: string } }).session.userId;
+
+  async function waitingRoom(module = createAbcWordsModule()) {
+    const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" }, [module]);
+    const host = await connect(url, { name: "Host" });
+    const a = await connect(url, { name: "Tamu1" });
+    const b = await connect(url, { name: "Tamu2" });
+    const room = await ok<GameRoom>(host, "room:create", { type: "abc-words", isPublic: true });
+    await ok(a, "room:join", { roomId: room.id });
+    await ok(b, "room:join", { roomId: room.id });
+    return { url, room, host, a, b };
+  }
+
+  it("host baru bisa mulai kalau semua pemain lain siap; host dianggap siap; siap bisa dibatalkan", async () => {
+    const { host, a, b } = await waitingRoom();
+    expect(await act(host, "start")).toMatchObject({ ok: false, error: { code: "PLAYERS_NOT_READY" } });
+
+    await ok(a, "room:action", { action: "ready", payload: { ready: true } });
+    await ok(b, "room:action", { action: "ready", payload: { ready: true } });
+    await ok(b, "room:action", { action: "ready", payload: { ready: false } });
+    expect((await state(host)).ready).toEqual([idOf(a)]);
+    const blocked = await act(host, "start");
+    expect(blocked).toMatchObject({ ok: false, error: { code: "PLAYERS_NOT_READY", details: { userIds: [idOf(b)] } } });
+
+    await ok(b, "room:action", { action: "ready", payload: { ready: true } });
+    await ok(host, "room:action", { action: "start" });
+    expect((await state(host)).phase).toBe("picking");
+    expect(await act(a, "ready", { ready: false })).toMatchObject({ ok: false, error: { code: "WRONG_PHASE" } });
+
+    await ok(host, "room:action", { action: "end" });
+    expect((await state(host)).ready).toEqual([]);
+  });
+
+  it("host memanggil pemain yang belum siap: hanya pemain itu yang menerima, dengan jeda", async () => {
+    const { host, a, b } = await waitingRoom(createAbcWordsModule({ pingCooldownMs: 100 }));
+    const received = waitFor<{ event: string; data: { from: string } }>(a, "room:event", (e) => e.event === "ping");
+    let bGotPing = false;
+    b.on("room:event", (e: { event: string }) => {
+      if (e.event === "ping") bGotPing = true;
+    });
+
+    await ok(host, "room:action", { action: "ping", payload: { userId: idOf(a) } });
+    expect((await received).data).toEqual({ from: "Host" });
+    expect(bGotPing).toBe(false);
+    expect("pingedAt" in (await state(host))).toBe(false); // tidak dikirim ke client
+
+    expect(await act(host, "ping", { userId: idOf(a) })).toMatchObject({ ok: false, error: { code: "PING_COOLDOWN" } });
+    await sleep(120);
+    expect(await act(host, "ping", { userId: idOf(a) })).toMatchObject({ ok: true });
+
+    expect(await act(a, "ping", { userId: idOf(b) })).toMatchObject({ ok: false, error: { code: "NOT_HOST" } });
+    await ok(b, "room:action", { action: "ready", payload: { ready: true } });
+    expect(await act(host, "ping", { userId: idOf(b) })).toMatchObject({ ok: false, error: { code: "ALREADY_READY" } });
+  });
+
+  it("kick hanya di ruang tunggu, dan pemain yang dikeluarkan boleh masuk lagi", async () => {
+    const { room, host, a, b } = await waitingRoom();
+    await ok(host, "room:kick", { userId: idOf(b) });
+    expect((await ok<GameRoom>(host, "room:sync")).members.map((m) => m.name)).toEqual(["Host", "Tamu1"]);
+    await ok(b, "room:join", { roomId: room.id }); // boleh masuk lagi
+
+    await ok(a, "room:action", { action: "ready", payload: { ready: true } });
+    await ok(b, "room:action", { action: "ready", payload: { ready: true } });
+    await ok(host, "room:action", { action: "start" });
+    expect(await call(host, "room:kick", { userId: idOf(a) })).toMatchObject({
+      ok: false,
+      error: { code: "GAME_RUNNING" },
+    });
+    expect((await ok<GameRoom>(host, "room:sync")).members).toHaveLength(3);
+  });
+});
+

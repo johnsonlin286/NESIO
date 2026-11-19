@@ -22,6 +22,8 @@ import { isVerifiedAnswer, sameAnswerKey } from "./words/index.js";
 export const ROOM_TYPE = "abc-words";
 export const MAX_ROUNDS = 10;
 export const MAX_PLAYERS = 8;
+/** Host boleh memanggil (ping) pemain yang sama paling cepat sekali per selang ini (default `pingCooldownMs`). */
+export const PING_COOLDOWN_MS = 10_000;
 /**
  * Minimal 3: dengan 2 pemain penilainya hanya satu orang, jadi satu tolakan sudah cukup
  * untuk menggugurkan jawaban lawan dengan sengaja.
@@ -163,6 +165,13 @@ export interface AbcWordsState extends ChatState {
    * Rata-ratanya (`totalMs / count`) memisahkan pemain dengan skor sama: yang lebih cepat di atas.
    */
   speed: Record<string, AnswerSpeed>;
+  /**
+   * Ruang tunggu: pemain yang sudah menekan "Siap". Host dianggap selalu siap; permainan baru
+   * bisa dimulai kalau semua pemain online lain sudah siap. Dikosongkan tiap kembali ke ruang tunggu.
+   */
+  ready: string[];
+  /** Kapan host terakhir memanggil tiap pemain (lihat `pingCooldownMs`); tidak dikirim ke client. */
+  pingedAt: Record<string, number>;
 }
 
 export interface AnswerSpeed {
@@ -198,6 +207,8 @@ export interface AbcWordsTiming {
   resultMs: number;
   /** Layar skor akhir kembali sendiri ke ruang tunggu setelah selang ini. */
   finishedMs: number;
+  /** Jeda minimal host memanggil pemain yang sama. */
+  pingCooldownMs: number;
 }
 
 const DEFAULT_TIMING: AbcWordsTiming = {
@@ -215,6 +226,7 @@ const DEFAULT_TIMING: AbcWordsTiming = {
   retryCooldownMs: 3_000,
   resultMs: 5_000,
   finishedMs: 30_000,
+  pingCooldownMs: PING_COOLDOWN_MS,
 };
 
 /**
@@ -328,6 +340,8 @@ function idleFields() {
     loneRejections: {} as Record<string, number>,
     idleRounds: {} as Record<string, number>,
     speed: {} as Record<string, AnswerSpeed>,
+    ready: [] as string[],
+    pingedAt: {} as Record<string, number>,
     ...emptyRound(),
   };
 }
@@ -616,6 +630,7 @@ export function createAbcWordsModule(
         lastCallUsed: _lastCallUsed,
         graceUsedBy: _graceUsedBy,
         rejectionsUsed,
+        pingedAt: _pingedAt,
         ...visible
       } = state;
       return {
@@ -634,11 +649,18 @@ export function createAbcWordsModule(
     },
 
     onMemberLeave(ctx, member, reason) {
+      // Kick hanya di ruang tunggu; saat bermain, pemain yang diam ditangani aturan AFK.
+      // Gagal di sini membatalkan seluruh kick (room tidak disimpan).
+      if (reason === "kicked" && ctx.room.state.phase !== "waiting" && ctx.room.state.phase !== "finished") {
+        ctx.fail("GAME_RUNNING", "Pemain hanya bisa dikeluarkan di ruang tunggu");
+      }
       const text = reason === "kicked" ? `${member.name} dikeluarkan` : `${member.name} keluar`;
       pushMessage(ctx, { userId: null, name: "system", text });
 
       const { state, members } = ctx.room;
       delete state.picks[member.userId];
+      state.ready = state.ready.filter((id) => id !== member.userId);
+      delete state.pingedAt[member.userId];
       if (state.phase !== "waiting" && state.phase !== "finished" && members.length < MIN_PLAYERS) {
         backToWaiting(ctx, "Permainan berakhir karena pemain tidak cukup");
         return;
@@ -679,6 +701,14 @@ export function createAbcWordsModule(
           }
           if (room.settings.category === "custom" && !room.settings.customCategory) {
             ctx.fail("CATEGORY_REQUIRED", "Tulis nama kategorinya dulu");
+          }
+          const notReady = room.members.filter(
+            (m) => m.isConnected && m.userId !== room.hostId && !room.state.ready.includes(m.userId),
+          );
+          if (notReady.length > 0) {
+            ctx.fail("PLAYERS_NOT_READY", `Menunggu ${notReady.length} pemain menekan "Siap"`, {
+              userIds: notReady.map((m) => m.userId),
+            });
           }
 
           room.state.endedReason = null;
@@ -856,6 +886,43 @@ export function createAbcWordsModule(
           else if (state.phase === "finished") backToWaiting(ctx, "Permainan selesai");
           else if (state.round >= ctx.room.settings.maxRounds) showFinalScores(ctx);
           else startRound(ctx, state.round + 1);
+        },
+      }),
+
+      /** Ruang tunggu: tandai (atau batalkan) "Siap". Host tidak perlu: dianggap selalu siap. */
+      ready: action({
+        schema: z.object({ ready: z.boolean() }),
+        handler(ctx, { ready }) {
+          const { state } = ctx.room;
+          const userId = ctx.sender!.userId;
+          if (state.phase !== "waiting") ctx.fail("WRONG_PHASE", "Permainan sudah berjalan");
+          state.ready = state.ready.filter((id) => id !== userId);
+          if (ready) state.ready.push(userId);
+        },
+      }),
+
+      /**
+       * Host memanggil pemain yang belum siap: hanya pemain itu yang menerima event `ping`
+       * (client membunyikan suara dan menggetarkan HP). Paling cepat sekali per `pingCooldownMs`.
+       */
+      ping: action({
+        hostOnly: true,
+        schema: z.object({ userId: z.string().min(1).max(128) }),
+        handler(ctx, { userId }) {
+          const { state, members } = ctx.room;
+          const now = ctx.now();
+          if (state.phase !== "waiting") ctx.fail("WRONG_PHASE", "Hanya bisa memanggil pemain di ruang tunggu");
+          if (userId === ctx.sender!.userId) ctx.fail("VALIDATION_ERROR", "Tidak bisa memanggil diri sendiri");
+          const target = members.find((m) => m.userId === userId);
+          if (!target) return ctx.fail("MEMBER_NOT_FOUND", "Pemain tidak ditemukan");
+          if (state.ready.includes(userId)) ctx.fail("ALREADY_READY", `${target.name} sudah siap`);
+          const last = state.pingedAt[userId];
+          if (last !== undefined && now - last < timing.pingCooldownMs) {
+            const retryAfterMs = timing.pingCooldownMs - (now - last);
+            ctx.fail("PING_COOLDOWN", `Tunggu ${Math.ceil(retryAfterMs / 1000)} detik lagi`, { retryAfterMs });
+          }
+          state.pingedAt[userId] = now;
+          ctx.emitTo(userId, "ping", { from: ctx.sender!.name });
         },
       }),
 
