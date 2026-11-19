@@ -43,12 +43,41 @@ export function withJoined(keys: string[]): string[] {
   return keys.flatMap((k) => (k.includes(" ") ? [k, k.replace(/ /g, "")] : [k]));
 }
 
+/**
+ * Only the base name is verified for kinds of things: "jambu biji", "ikan emas", "bawang merah" are dropped
+ * (with their joined spelling) when "jambu", "ikan", "bawang" are in the list, so such answers go to
+ * the vote. Kept: reduplications ("kura kura") and `keep`, names of something else entirely ("kuda nil").
+ */
+export function dropQualified(keys: Set<string>, keep: readonly string[] = []): string[] {
+  const dropped: string[] = [];
+  for (const key of [...keys]) {
+    const words = key.split(" ");
+    const reduplication = words.length === 2 && words[0] === words[1];
+    if (words.length < 2 || reduplication || keep.includes(key) || !keys.has(words[0]!)) continue;
+    keys.delete(key);
+    keys.delete(key.replace(/ /g, ""));
+    dropped.push(key);
+  }
+  return dropped;
+}
+
 /** Writes `words/<name>.json` (sorted, unique) and prints a short summary instead of the list. */
-export function writeWordList(name: string, list: { source: string; license: string; words: string[] }): void {
+export function writeWordList(
+  name: string,
+  list: {
+    source: string;
+    license: string;
+    words: string[];
+    /** Other names of the same thing -> its main name ("amerika" -> "amerika serikat"), for duplicates. */
+    same?: Record<string, string>;
+  },
+): void {
   const words = [...new Set(list.words)].sort();
+  const same = list.same && Object.fromEntries(Object.entries(list.same).sort(([a], [b]) => a.localeCompare(b)));
   mkdirSync(OUT_DIR, { recursive: true });
   const file = resolve(OUT_DIR, `${name}.json`);
-  writeFileSync(file, `${JSON.stringify({ source: list.source, license: list.license, words }, null, 1)}\n`);
+  const json = { source: list.source, license: list.license, words, ...(same && { same }) };
+  writeFileSync(file, `${JSON.stringify(json, null, 1)}\n`);
 
   const byLetter = new Map<string, string[]>();
   for (const w of words) byLetter.set(w[0]!, [...(byLetter.get(w[0]!) ?? []), w]);

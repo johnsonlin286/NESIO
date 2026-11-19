@@ -6,8 +6,10 @@
  * Indonesia beserta ejaan lain yang lazim). Jumlahnya terbatas, jadi tidak perlu sumber luar.
  * Bumbu dan rempah (jahe, kunyit) sengaja tidak dimasukkan; jawaban seperti itu lewat voting.
  * Nama dua kata juga diterima ditulis gabung, dan kata ulang tanpa tanda hubung ("lobi lobi").
+ * Yang terverifikasi hanya nama dasar: "jambu biji", "jeruk nipis" lewat voting karena "jambu" dan
+ * "jeruk" ada di daftar (lihat `dropQualified`).
  */
-import { toKeys, withJoined, writeWordList } from "./shared.js";
+import { dropQualified, toKeys, withJoined, writeWordList } from "./shared.js";
 
 const BUAH = `
   apel anggur alpukat avokad aprikot ara arbei belimbing belimbing-wuluh bisbul blewah buah-naga buni
@@ -31,7 +33,8 @@ const SAYUR = `
 const words = [...BUAH.trim().split(/\s+/), ...SAYUR.trim().split(/\s+/)];
 const keys = new Set<string>();
 for (const word of words) for (const key of withJoined(toKeys(word))) keys.add(key);
-console.log(`daftar: ${words.length} nama`);
+const dropped = dropQualified(keys);
+console.log(`daftar: ${words.length} nama; lewat voting (kata dasarnya ada): ${dropped.join(", ")}`);
 
 writeWordList("buah-sayur", {
   source: "Common Indonesian fruit and vegetable names written for this project",

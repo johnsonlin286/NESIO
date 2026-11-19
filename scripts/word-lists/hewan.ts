@@ -13,10 +13,12 @@
  * 2. `COMMON`: hewan yang umum dijawab, ditulis untuk proyek ini (Wordnet Bahasa tidak lengkap,
  *    mis. "kecoa" tidak ada).
  * Kata ulang ("kura-kura") juga diterima tanpa tanda hubung: "kura kura" dan "kurakura".
+ * Yang terverifikasi hanya nama dasar: "ikan emas", "ular kobra" lewat voting karena "ikan" dan "ular" ada
+ * di daftar (lihat `dropQualified`), kecuali hewan lain sama sekali (`DIFFERENT_ANIMALS`).
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { toKeys, withJoined, writeWordList } from "./shared.js";
+import { dropQualified, toKeys, withJoined, writeWordList } from "./shared.js";
 
 const dir = process.argv[2];
 if (!dir) throw new Error("Pakai: npx tsx scripts/word-lists/hewan.ts <folder berisi wn-data-ind.tab dan dict/data.noun>");
@@ -49,6 +51,9 @@ const EXCLUDE = new Set(
     .split(/\s+/)
     .map((w) => w.replace(/-/g, " ")),
 );
+
+/** Kata dasar + kata tambahan yang hewannya lain sama sekali dari kata dasarnya; tetap terverifikasi. */
+const DIFFERENT_ANIMALS = ["kuda nil", "kuda laut", "anjing laut", "lembu laut", "dara laut", "burung unta"];
 
 /** Hewan yang umum dijawab, per huruf; melengkapi Wordnet Bahasa. */
 const COMMON = `
@@ -100,7 +105,9 @@ for (const line of readFileSync(resolve(dir, "wn-data-ind.tab"), "utf8").split("
   for (const key of withJoined(toKeys(word))) keys.add(key);
 }
 for (const word of COMMON) for (const key of withJoined(toKeys(word))) keys.add(key);
+const dropped = dropQualified(keys, DIFFERENT_ANIMALS);
 console.log(`Wordnet Bahasa: ${fromWordnet} lemma dipakai; daftar umum: ${COMMON.length}`);
+console.log(`lewat voting (kata dasarnya ada): ${dropped.join(", ")}`);
 
 writeWordList("hewan", {
   source:

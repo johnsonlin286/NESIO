@@ -1658,16 +1658,29 @@ describe("abc-words: jawaban terverifikasi", () => {
     ]);
   });
 
-  it("buah & sayur: buah dan sayur terverifikasi, ejaan lain juga", async () => {
+  it("buah & sayur: nama dasar terverifikasi, nama dengan kata tambahan lewat voting", async () => {
     const [a, b, c] = await answering({ category: "buah-sayur" });
-    await act(a, "answer", { text: "Cabe rawit" });
+    await act(a, "answer", { text: "Cabe" }); // ejaan lain dari cabai
     await act(b, "answer", { text: "Ceri" });
-    await act(c, "answer", { text: "Cumi" });
+    await act(c, "answer", { text: "Cabai rawit" }); // "cabai" ada di daftar, jadi ini dinilai pemain
     expect((await state(a)).answers.map((x) => [x.text, x.verified])).toEqual([
-      ["Cabe Rawit", true],
+      ["Cabe", true],
       ["Ceri", true],
-      ["Cumi", false],
+      ["Cabai Rawit", false],
     ]);
+  });
+
+  it("nama lain negara yang sama dan beda spasi dihitung jawaban kembar", async () => {
+    const [a, b] = await answering({ category: "negara" });
+    expect(await act(a, "answer", { text: "Cile" })).toMatchObject({ status: "accepted" });
+    // Masuk 2 detik setelahnya, jadi "keduluan" (dapat tambahan waktu), bukan diterima.
+    expect(await act(b, "answer", { text: "Chili" })).toMatchObject({ status: "near-tie" });
+    expect((await state(a)).answers.map((x) => x.text)).toEqual(["Cile"]);
+
+    const [x, y] = await answering({ category: "hewan" });
+    await act(x, "answer", { text: "Cumi cumi" });
+    expect(await act(y, "answer", { text: "Cumicumi" })).toMatchObject({ status: "near-tie" });
+    expect((await state(x)).answers).toHaveLength(1);
   });
 
   it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
