@@ -202,7 +202,7 @@ export interface AbcWordsTiming {
 
 const DEFAULT_TIMING: AbcWordsTiming = {
   pickMs: 10_000,
-  revealMs: 20_000,
+  revealMs: 10_000,
   changedRevealMs: 3_000,
   abandonMs: 5_000,
   answerMs: 30_000,
