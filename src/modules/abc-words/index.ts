@@ -25,13 +25,14 @@ export const MAX_PLAYERS = 8;
 /** Host boleh memanggil (ping) pemain yang sama paling cepat sekali per selang ini (default `pingCooldownMs`). */
 export const PING_COOLDOWN_MS = 10_000;
 /**
- * Minimal 3: dengan 2 pemain penilainya hanya satu orang, jadi satu tolakan sudah cukup
- * untuk menggugurkan jawaban lawan dengan sengaja.
+ * Minimal 2. Berdua, jawaban di luar daftar dinilai satu lawan saja: satu tolakan menggugurkannya,
+ * tapi tanpa pengurangan poin (`POINTS.rejectedByOne`), dan jatah tolak tidak dikembalikan,
+ * jadi lawan paling banyak menjegal `MAX_REJECTIONS` jawaban per permainan.
  */
-export const MIN_PLAYERS = 3;
+export const MIN_PLAYERS = 2;
 /** Jatah menolak jawaban per pemain per permainan. Tolakan yang terbukti benar dikembalikan. */
 export const MAX_REJECTIONS = 3;
-/** Jawaban hanya bisa gugur kalau ditolak minimal sekian pemain. */
+/** Jawaban hanya bisa gugur kalau ditolak minimal sekian pemain (kecuali penilainya hanya satu). */
 export const MIN_REJECTIONS_TO_FAIL = 2;
 /** Alasan wajib saat menolak jawaban; ditampilkan ke semua pemain. */
 export const REJECT_REASONS = ["off-category", "misspelled", "not-a-word"] as const;
@@ -94,6 +95,8 @@ export interface Answer {
   rejectedBy: { userId: string; name: string; reason: RejectReason }[];
   /** Hasil voting; `null` sampai fase voting selesai. */
   accepted: boolean | null;
+  /** Dinilai hanya oleh satu pemain lain (lihat `POINTS.rejectedByOne`); diisi saat hasil keluar. */
+  judgedByOne: boolean;
   /** Perubahan skor dari jawaban ini: +1 lolos, -1 gugur (0 kalau skor sudah 0). `null` sebelum hasil. */
   points: number | null;
 }
@@ -109,6 +112,11 @@ export const POINTS = {
    * berat untuk itu (masukan playtest). Skor tetap tidak bisa di bawah 0.
    */
   rejected: -1,
+  /**
+   * Gugur karena ditolak satu-satunya penilai (main berdua, atau tinggal dua yang online): satu
+   * orang bisa salah atau sengaja menjegal, jadi jawabannya tidak dapat poin tapi juga tidak dihukum.
+   */
+  rejectedByOne: 0,
   noAnswer: -1,
   /** Menolak jawaban yang lolos tanpa didukung pemain lain, setelah peringatan habis. */
   loneRejection: -1,
@@ -452,7 +460,7 @@ export function createAbcWordsModule(
   /**
    * Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya, dan minimal 2 orang:
    * selama ada pemain yang putus (masa tunggu reconnect) satu orang tetap tidak bisa menggugurkan sendirian.
-   * Poin (lihat `POINTS`): lolos +1, gugur -2, tidak menjawab -1, menolak sendirian jawaban yang
+   * Poin (lihat `POINTS`): lolos +1, gugur -1 (0 kalau penilainya hanya satu), tidak menjawab -1, menolak sendirian jawaban yang
    * tetap lolos -1 setelah dua peringatan (hanya kalau ada minimal 2 penilai online). Skor tidak turun di bawah 0.
    * Penolak jawaban yang gugur mendapat jatah tolaknya kembali kalau ada pemain lain yang ikut menolak;
    * penolak jawaban yang lolos tidak.
@@ -471,9 +479,13 @@ export function createAbcWordsModule(
     for (const answer of state.answers) {
       const voters = online.filter((id) => id !== answer.userId);
       const counted = answer.rejectedBy.filter((r) => voters.includes(r.userId));
-      answer.accepted =
-        answer.verified || counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
-      answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : POINTS.rejected);
+      // Penilainya hanya satu: tolakannya menentukan, tapi gugurnya tanpa pengurangan poin.
+      answer.judgedByOne = !answer.verified && voters.length === 1;
+      answer.accepted = answer.judgedByOne
+        ? counted.length === 0
+        : answer.verified || counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
+      const rejectedPoints = answer.judgedByOne ? POINTS.rejectedByOne : POINTS.rejected;
+      answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : rejectedPoints);
       if (answer.accepted) {
         const speed = (state.speed[answer.userId] ??= { totalMs: 0, count: 0 });
         speed.totalMs += answer.ms;
@@ -813,6 +825,7 @@ export function createAbcWordsModule(
             ms: now - state.answeringStartedAt!,
             verified,
             rejectedBy: [],
+            judgedByOne: false,
             accepted: null,
             points: null,
           });

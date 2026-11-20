@@ -54,14 +54,14 @@ describe("abc-words: ruang tunggu", () => {
     });
   });
 
-  it("room tidak bisa dibuat untuk kurang dari 3 pemain", async () => {
+  it("room tidak bisa dibuat untuk kurang dari 2 pemain", async () => {
     const { url } = await startServer();
     const host = await connect(url, { name: "Host" });
-    expect(await call(host, "room:create", { type: "abc-words", maxMembers: 2 })).toMatchObject({
+    expect(await call(host, "room:create", { type: "abc-words", maxMembers: 1 })).toMatchObject({
       ok: false,
       error: { code: "VALIDATION_ERROR" },
     });
-    await ok(host, "room:create", { type: "abc-words", maxMembers: 3 });
+    await ok(host, "room:create", { type: "abc-words", maxMembers: 2 });
   });
 
   it("host mengubah konfigurasi dan pemain lain langsung menerimanya", async () => {
@@ -158,7 +158,7 @@ describe("abc-words: memulai permainan", () => {
     await ok(host, "room:action", { action: "start" });
   });
 
-  it("butuh minimal 3 pemain", async () => {
+  it("butuh minimal 2 pemain", async () => {
     const { url } = await startServer();
     const host = await connect(url, { name: "Host" });
     const guest = await connect(url, { name: "Tamu" });
@@ -167,23 +167,17 @@ describe("abc-words: memulai permainan", () => {
       ok: false,
       error: { code: "NOT_ENOUGH_PLAYERS" },
     });
-    // Berdua juga belum cukup: penilai jawaban hanya satu orang.
     await joinReady(guest, room.id);
-    expect(await call(host, "room:action", { action: "start" })).toMatchObject({
-      ok: false,
-      error: { code: "NOT_ENOUGH_PLAYERS" },
-    });
+    await ok(host, "room:action", { action: "start" });
   });
 
-  it("3 pemain tapi satu sedang putus koneksi: belum bisa mulai", async () => {
+  it("2 pemain tapi satu sedang putus koneksi: belum bisa mulai", async () => {
     const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" });
     const host = await connect(url, { name: "Host" });
     const guest = await connect(url, { name: "Tamu" });
-    const guest2 = await connect(url, { name: "Tamu2" });
     const room = await ok<GameRoom>(host, "room:create", { type: "abc-words" });
     await joinReady(guest, room.id);
-    await joinReady(guest2, room.id);
-    guest2.disconnect();
+    guest.disconnect();
     await sleep(30);
     expect(await call(host, "room:action", { action: "start" })).toMatchObject({
       ok: false,
@@ -220,9 +214,11 @@ describe("abc-words: memulai permainan", () => {
     expect((await listed(url, room.id)).locked).toBe(false);
   });
 
-  it("pemain keluar sampai tersisa dua: permainan berakhir dan room terbuka lagi", async () => {
-    const { url, host, guest, room } = await started();
+  it("pemain keluar sampai tersisa satu: permainan berakhir dan room terbuka lagi", async () => {
+    const { url, host, guest, guest2, room } = await started();
     await ok(guest, "room:leave");
+    expect((await ok<GameRoom>(host, "room:sync")).state.phase).toBe("picking"); // berdua tetap jalan
+    await ok(guest2, "room:leave");
     const view = await ok<GameRoom>(host, "room:sync");
     expect(view.state).toMatchObject({ phase: "waiting", endedReason: "Permainan berakhir karena pemain tidak cukup" });
     expect((await listed(url, room.id)).locked).toBe(false);
@@ -456,8 +452,8 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
     return { url, host, guests, guest: guests[0]!, room };
   }
 
-  it("tersisa dua pemain online: permainan berakhir dan pesannya sampai ke room", async () => {
-    const { host, guest } = await playing(60);
+  it("tersisa satu pemain online: permainan berakhir dan pesannya sampai ke room", async () => {
+    const { host, guest } = await playing(60, 2);
     guest.disconnect();
     await sleep(120);
     await ok(host, "room:action", { action: "tick" });
@@ -469,11 +465,11 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
     });
     expect(view.state.messages.at(-1)?.text).toBe("Permainan berakhir karena pemain lain terputus");
     expect(view.locked).toBe(false);
-    expect(view.members).toHaveLength(3); // masih dalam masa tunggu reconnect
+    expect(view.members).toHaveLength(2); // masih dalam masa tunggu reconnect
   });
 
   it("host yang putus juga mengakhiri permainan", async () => {
-    const { host, guest } = await playing(60);
+    const { host, guest } = await playing(60, 2);
     host.disconnect();
     await sleep(120);
     await ok(guest, "room:action", { action: "tick" });
@@ -495,9 +491,9 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
     expect((await ok<GameRoom>(host, "room:sync")).state.phase).toBe("picking");
   });
 
-  it("masih ada 3 pemain online: permainan tetap berjalan", async () => {
-    const { host, guests } = await playing(60, 4);
-    guests[2]!.disconnect();
+  it("masih ada 2 pemain online: permainan tetap berjalan", async () => {
+    const { host, guests } = await playing(60, 3);
+    guests[1]!.disconnect();
     await sleep(120);
     expect(await call(host, "room:action", { action: "tick" })).toMatchObject({
       ok: false,
@@ -529,10 +525,8 @@ describe("abc-words: pemain putus koneksi di tengah permainan", () => {
     try {
       const host = await connect(url, { name: "Host" });
       const guest = await connect(url, { name: "Tamu" });
-      const guest2 = await connect(url, { name: "Tamu2" });
       const room = await ok<GameRoom>(host, "room:create", { type: "abc-words" });
       await joinReady(guest, room.id);
-      await joinReady(guest2, room.id);
       await ok(host, "room:action", { action: "start" });
 
       const ended = waitFor<GameRoom>(host, "room:state", (r) => r.state.phase === "waiting", 2000);
@@ -920,17 +914,37 @@ describe("abc-words: voting dan skor", () => {
     expect(await verdict(p0, p2)).toBe(false);
   });
 
-  it("penilai yang online tinggal satu: tolakannya tidak menggugurkan dan tidak dihukum", async () => {
+  it("penilai yang online tinggal satu: tolakannya menggugurkan tanpa pengurangan poin", async () => {
     const { sockets } = await voting(["aa", "bb", "cc"]);
     const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
     (p2 as unknown as { disconnect(): void }).disconnect(); // masih dalam masa tunggu reconnect
     await sleep(30);
-    await reject(p1, p0); // 1 dari 1 penilai online, tapi sendirian
+    await reject(p1, p0); // satu-satunya penilai online untuk jawaban P0
     await tick(p0);
-    expect(await verdict(p0, p0)).toBe(true);
+    expect(await verdict(p0, p0)).toBe(false);
     const now = await state(p0);
-    expect(now.penalties).toEqual([]);
+    expect(now.answers.find((a) => a.userId === idOf(p0))).toMatchObject({ judgedByOne: true, points: 0 });
+    // Aturan "menolak sendirian" tidak berlaku: setiap tolakan memang sendirian.
+    expect(now.penalties.filter((p) => p.reason === "lone-rejection")).toEqual([]);
     expect(now.loneRejections).toEqual({});
+  });
+
+  it("main berdua: jawaban di luar daftar lolos kecuali ditolak lawan, gugurnya 0 poin, jatah tidak kembali", async () => {
+    const { sockets } = await voting(["aa", "bb"]);
+    const [p0, p1] = sockets as [Socket, Socket];
+    await reject(p1, p0, true, "not-a-word");
+    await tick(p0);
+    const now = await state(p0);
+    expect(now.phase).toBe("result");
+    expect(await verdict(p0, p0)).toBe(false);
+    expect(await verdict(p0, p1)).toBe(true);
+    expect(now.answers.map((a) => [a.judgedByOne, a.points])).toEqual([
+      [true, 0],
+      [true, 1],
+    ]);
+    expect(now.scores).toEqual({ [idOf(p0)]: 0, [idOf(p1)]: 1 });
+    // Tolakan yang menggugurkan tidak dikembalikan saat berdua: paling banyak 3 jegalan per permainan.
+    expect((await state(p1)).rejectionsLeft).toBe(2);
   });
 
   it("4 pemain: butuh 2 dari 3 pemain lain", async () => {
