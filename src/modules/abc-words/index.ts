@@ -38,6 +38,9 @@ export const REJECT_REASONS = ["off-category", "misspelled", "not-a-word"] as co
 export type RejectReason = (typeof REJECT_REASONS)[number];
 const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
+/** Pilihan lama menjawab (detik) yang bisa diatur host; default 30. */
+export const ANSWER_SECONDS_OPTIONS = [20, 25, 30, 35, 40] as const;
+
 const settingsSchema = z.object({
   historyLimit: z.number().int().min(0).max(200).default(50),
   // Semua kategori tetap punya daftar jawaban terverifikasi (lihat ./words); "custom" lewat voting.
@@ -45,6 +48,14 @@ const settingsSchema = z.object({
   /** Dipakai kalau `category` = "custom". */
   customCategory: z.string().transform(cleanText).pipe(z.string().max(40)).default(""),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS).default(MAX_ROUNDS),
+  /** Lama fase menjawab, salah satu dari `ANSWER_SECONDS_OPTIONS`. */
+  answerSeconds: z
+    .number()
+    .int()
+    .refine((s) => (ANSWER_SECONDS_OPTIONS as readonly number[]).includes(s), {
+      message: `Lama menjawab harus salah satu dari ${ANSWER_SECONDS_OPTIONS.join(", ")} detik`,
+    })
+    .default(30),
 });
 export type AbcWordsSettings = z.infer<typeof settingsSchema>;
 
@@ -91,8 +102,11 @@ export type AnswerResult = { status: "accepted" | "duplicate" | "near-tie"; retr
 /** Poin per hasil. Skor tidak pernah turun di bawah 0. */
 export const POINTS = {
   accepted: 1,
-  /** Lebih berat dari tidak menjawab, supaya asal menjawab tidak pernah menguntungkan. */
-  rejected: -2,
+  /**
+   * Sama dengan tidak menjawab: jawaban yang gugur sering hanya salah ketik, dan −2 terasa terlalu
+   * berat untuk itu (masukan playtest). Skor tetap tidak bisa di bawah 0.
+   */
+  rejected: -1,
   noAnswer: -1,
   /** Menolak jawaban yang lolos tanpa didukung pemain lain, setelah peringatan habis. */
   loneRejection: -1,
@@ -416,7 +430,8 @@ export function createAbcWordsModule(
     const { state } = ctx.room;
     state.phase = "answering";
     state.answeringStartedAt = ctx.now();
-    setDeadline(ctx, timing.answerMs);
+    // Diatur host per room; `overrides.answerMs` (dipakai tes) tetap menang.
+    setDeadline(ctx, overrides.answerMs ?? ctx.room.settings.answerSeconds * 1000);
   }
 
   function finishAnswering(ctx: Ctx): void {

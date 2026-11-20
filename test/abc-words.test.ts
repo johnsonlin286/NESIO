@@ -45,7 +45,13 @@ describe("abc-words: ruang tunggu", () => {
     const { room } = await setup();
     expect(room.state.phase).toBe("waiting");
     expect(room.maxMembers).toBe(8);
-    expect(room.settings).toEqual({ historyLimit: 50, category: "negara", customCategory: "", maxRounds: 10 });
+    expect(room.settings).toEqual({
+      historyLimit: 50,
+      category: "negara",
+      customCategory: "",
+      maxRounds: 10,
+      answerSeconds: 30,
+    });
   });
 
   it("room tidak bisa dibuat untuk kurang dari 3 pemain", async () => {
@@ -1114,8 +1120,8 @@ describe("abc-words: voting dan skor", () => {
     expect((await state(p0)).rejectionsLeft).toBe(2);
   });
 
-  it("jawaban gugur mengurangi 2 poin, tidak sampai di bawah 0", async () => {
-    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 4 });
+  it("jawaban gugur mengurangi 1 poin, tidak sampai di bawah 0", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 5 });
     const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
     await tick(p0); // ronde 1: semua lolos
     await tick(p0);
@@ -1124,14 +1130,18 @@ describe("abc-words: voting dan skor", () => {
     await tick(p0);
     expect((await state(p0)).scores).toEqual({ [idOf(p0)]: 2, [idOf(p1)]: 2, [idOf(p2)]: 2 });
 
-    // Ronde 3: 2 -> 0 (poin -2). Ronde 4: sudah 0, tetap 0 (poin 0).
-    for (const points of [-2, 0]) {
+    // Ronde 3: 2 -> 1, ronde 4: 1 -> 0 (poin -1). Ronde 5: sudah 0, tetap 0 (poin 0).
+    for (const [points, score] of [
+      [-1, 1],
+      [-1, 0],
+      [0, 0],
+    ] as const) {
       await playRound(sockets, ["aa", "bb", "cc"]);
       await reject(p1, p0);
       await reject(p2, p0);
       await tick(p0); // hasil
       const now = await state(p0);
-      expect(now.scores[idOf(p0)]).toBe(0);
+      expect(now.scores[idOf(p0)]).toBe(score);
       expect(now.answers.find((a) => a.userId === idOf(p0))!.points).toBe(points);
       await tick(p0);
     }
@@ -1778,3 +1788,33 @@ describe("abc-words: siap, panggil, dan keluarkan pemain", () => {
   });
 });
 
+
+describe("abc-words: lama menjawab diatur host", () => {
+  it("hanya 20/25/30/35/40 detik, dan fase menjawab memakai pengaturan room", async () => {
+    // Tanpa `answerMs` di sini, supaya lama menjawab diambil dari pengaturan room.
+    const module = createAbcWordsModule({ pickMs: 5000, revealMs: 5000, minAnswerMs: 0 });
+    const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" }, [module]);
+    const host = await connect(url, { name: "Host" });
+    const room = await ok<GameRoom>(host, "room:create", { type: "abc-words", isPublic: true });
+    expect(room.settings.answerSeconds).toBe(30);
+
+    for (const bad of [33, 15, 45, 30.5]) {
+      expect(await call(host, "room:update", { settings: { answerSeconds: bad } })).toMatchObject({ ok: false });
+    }
+    const updated = await ok<GameRoom>(host, "room:update", { settings: { answerSeconds: 20 } });
+    expect(updated.settings.answerSeconds).toBe(20);
+
+    const guests = [await connect(url, { name: "Tamu1" }), await connect(url, { name: "Tamu2" })];
+    for (const g of guests) await joinReady(g, room.id);
+    const sockets = [host, ...guests];
+    await ok(host, "room:action", { action: "start" });
+    for (const s of sockets) await ok(s, "room:action", { action: "pick", payload: { value: 1 } });
+    for (const s of sockets.slice(0, 2)) {
+      await ok(s, "room:action", { action: "changeLetter", payload: { choice: "keep" } });
+    }
+    const answering = (await ok<GameRoom>(host, "room:sync")).state;
+    expect(answering.phase).toBe("answering");
+    expect(answering.phaseMs).toBe(20_000);
+    expect(await call(host, "room:update", { settings: { answerSeconds: 40 } })).toMatchObject({ ok: false });
+  });
+});
