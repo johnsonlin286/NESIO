@@ -1701,6 +1701,18 @@ describe("abc-words: jawaban terverifikasi", () => {
     expect((await state(x)).answers).toHaveLength(1);
   });
 
+  it("profesi: hanya satu kata yang terverifikasi", async () => {
+    const [a, b, c] = await answering({ category: "profesi" });
+    await act(a, "answer", { text: "Camat" });
+    await act(b, "answer", { text: "Cerpenis" });
+    await act(c, "answer", { text: "Chef" }); // bahasa Inggris; "Koki" yang terverifikasi
+    expect((await state(a)).answers.map((x) => [x.text, x.verified])).toEqual([
+      ["Camat", true],
+      ["Cerpenis", true],
+      ["Chef", false],
+    ]);
+  });
+
   it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
     const [a] = await answering({ category: "custom", customCategory: "Benda" });
     await act(a, "answer", { text: "Cina" });

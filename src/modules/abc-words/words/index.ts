@@ -7,12 +7,14 @@ import buahSayur from "./buah-sayur.json" with { type: "json" };
 import hewan from "./hewan.json" with { type: "json" };
 import kota from "./kota.json" with { type: "json" };
 import negara from "./negara.json" with { type: "json" };
+import profesi from "./profesi.json" with { type: "json" };
 
 const LISTS: Readonly<Record<string, ReadonlySet<string>>> = {
   negara: new Set(negara.words),
   kota: new Set(kota.words),
   hewan: new Set(hewan.words),
   "buah-sayur": new Set(buahSayur.words),
+  profesi: new Set(profesi.words),
 };
 
 /** Kategori yang punya daftar jawaban terverifikasi. */
