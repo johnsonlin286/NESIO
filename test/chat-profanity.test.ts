@@ -30,6 +30,11 @@ describe("filter kata kasar", () => {
     "kontolx",
     "kontolkuda",
     "bacotan lu",
+    // Akar kata kasar bahasa Inggris sebagai awalan.
+    "fuckx",
+    "fuuuckk",
+    "shitty",
+    "bitchy",
   ])("menangkap: %s", (text) => {
     expect(checker.isProfane(text)).toBe(true);
   });
@@ -59,6 +64,10 @@ describe("filter kata kasar", () => {
     "bangsawan",
     "taipan",
     "begonia",
+    "cocok",
+    "kokpit",
+    "dikte",
+    "nigeria",
   ])("tidak menangkap: %s", (text) => {
     expect(checker.isProfane(text)).toBe(false);
   });

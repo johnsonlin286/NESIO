@@ -74,6 +74,14 @@ export const MIN_PREFIX_LENGTH = 5;
  */
 const NOT_PREFIXES = new Set(["kentu", "nying", "buset", "bujug"]);
 
+/**
+ * Akar kata kasar bahasa Inggris yang dicari sebagai awalan ("fuckx", "shitty"). Dipilih manual:
+ * kata Inggris yang paling umum hanya 4 huruf, dan memakai seluruh daftar `@2toad/profanity` sebagai
+ * awalan akan menolak kata Indonesia ("anal" -> analisis, "semen" -> semenanjung). Tidak ada kata
+ * Indonesia yang berawalan salah satu akar ini; dijaga oleh tes daftar kata kategori.
+ */
+const ENGLISH_PREFIXES = ["fuck", "shit", "cunt", "bitch", "whore", "slut", "dick", "cock", "pussy", "nigg", "wank", "twat"];
+
 /** Kata-kata huruf dari teks yang sudah dinormalkan, untuk pemeriksaan akhiran dan awalan. */
 const wordsOf = (text: string) => normalizeForMatching(text).split(/[^\p{L}]+/u).filter(Boolean);
 
@@ -115,6 +123,11 @@ export function createProfanityChecker({ strict = true, extraAllowed = [] }: Pro
   );
   const longestPrefix = Math.max(...[...prefixes].map((w) => w.length));
   const startsWithBadWord = (word: string) => {
+    // "fuuuckk": huruf berulang dipadatkan jadi satu, hanya untuk akar tanpa huruf ganda.
+    const squeezed = word.replace(/(\p{L})\1+/gu, "$1");
+    if (ENGLISH_PREFIXES.some((root) => word.startsWith(root) || (!/(.)\1/.test(root) && squeezed.startsWith(root)))) {
+      return true;
+    }
     for (let n = MIN_PREFIX_LENGTH; n <= Math.min(word.length, longestPrefix); n++) {
       if (prefixes.has(word.slice(0, n))) return true;
     }
