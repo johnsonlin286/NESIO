@@ -23,7 +23,10 @@ import { dropQualified, toKeys, withJoined, writeWordList } from "./shared.js";
 const dir = process.argv[2];
 if (!dir) throw new Error("Pakai: npx tsx scripts/word-lists/hewan.ts <folder berisi wn-data-ind.tab dan dict/data.noun>");
 
-/** Kata dari Wordnet Bahasa yang bukan nama hewan (diperiksa satu per satu dari 606 kata). */
+/**
+ * Kata dari Wordnet Bahasa yang bukan nama hewan (diperiksa satu per satu dari 606 kata), ditambah
+ * "lama" (llama): terlalu mirip kata "lama", dan pemilik tidak ingin satu hewan bisa dipakai untuk dua huruf.
+ */
 const EXCLUDE = new Set(
   `
   aerob agama alam-semesta alantois alga ambing ameba amnion ampela amuba anaerob anak api-api apung
@@ -36,7 +39,7 @@ const EXCLUDE = new Set(
   insang invertebrata jambak jambu-jambu jambul janggut janin jantan jaringan jenazah jengger jumbai kacukan
   kaki kampang kangkang kanak-kanak kapak karier karkas karnivor kecil kelasa kepak kepala kerakap kerangka
   ketek kicauan klorofil kokus krustasea kuku kulit kulit-ari kulit-bulu kulit-kerang kuman kuning-telur
-  laki-laki lambung lamun lapisan larva lelaki lembaga lingsa listeria lumut-laut lutut madu madukara mamalia
+  laki-laki lama lambung lamun lapisan larva lelaki lembaga lingsa listeria lumut-laut lutut madu madukara mamalia
   mangsa manusia matang mayat merangkak-rangkak mikrob mikroba mikroorganisme misai mole monitor mua muda
   mudigah muka mulut muncung mutan naga nara nematoda omnivor orang parasit paruh patogen patung pawang pekan
   pekerja pelata pemakan pemangsa peneluran pengangkut penggiling pengimbang penyelam penyengat penyepit
@@ -71,7 +74,7 @@ const COMMON = `
   kakak-tua kakatua kakap kalajengking kalkun kambing kancil kanguru kasuari katak kecoa kecoak kelelawar
   kelinci kembung kenari kepik kepiting kera kerang kerapu kerbau kijang koala kodok kolibri komodo kuda
   kuda-laut kuda-nil kukang kumbang kunang-kunang kupu-kupu kura-kura kuskus kutilang kutu
-  laba-laba lalat landak lebah lele lemur lemuru lintah lipan lobster lumba-lumba lutung lama
+  laba-laba lalat landak lebah lele lemur lemuru lintah lipan lobster lumba-lumba lutung
   macan maleo mamut mandril marmut mencit merak merpati monyet mujair musang
   ngengat nila nuri nyamuk
   okapi onta orang-utan orang-hutan
