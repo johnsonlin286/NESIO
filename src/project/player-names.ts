@@ -1,6 +1,7 @@
 import type { Authenticator } from "../auth/types.js";
 import type { RoomStore } from "../core/store/room-store.js";
 import { AppError } from "../lib/errors.js";
+import { createProfanityChecker } from "../modules/chat/profanity.js";
 import type { AppServer, AppSocket } from "../socket/types.js";
 
 /**
@@ -15,6 +16,20 @@ export const PLAYER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 /** connect_error yang diterima client. */
 export const INVALID_NAME = "INVALID_NAME";
 export const NAME_TAKEN = "NAME_TAKEN";
+/** Nama berisi kata kasar (kamus ketat, sama dengan chat: nama tidak boleh berupa ejekan). */
+export const INAPPROPRIATE_NAME = "INAPPROPRIATE_NAME";
+
+const nameProfanity = createProfanityChecker();
+
+/**
+ * Nama sering diberi angka atau tanda di belakangnya ("kontol123"), yang membuat kata kasarnya
+ * tidak terbaca sebagai kata utuh. Jadi diperiksa dua kali: apa adanya (menangkap "b4bi"), dan dengan
+ * angka, "_" dan "-" diganti spasi. Kata kasar di tengah kata lain ("xxbangsatxx") sengaja tidak
+ * dicari, supaya nama wajar seperti "Bangsawan" tidak ikut ditolak.
+ */
+export function isInappropriateName(name: string): boolean {
+  return nameProfanity.isProfane(name) || nameProfanity.isProfane(name.replace(/[\d_-]+/g, " "));
+}
 
 /** Klaim singkat untuk menutup race dua handshake bersamaan dengan nama yang sama. */
 const HANDSHAKE_CLAIM_MS = 5_000;
@@ -66,6 +81,7 @@ export function createPlayerNameGuard({ base, store, io, now = Date.now }: Playe
     const name = input.auth.name;
     // Mode guest tanpa nama akan memberi nama "Guest-XXXX"; ABC Lima Dasar mewajibkan nama sendiri.
     if (!name || !isValidPlayerName(name)) throw new AppError(INVALID_NAME, "Nama tidak valid");
+    if (isInappropriateName(name)) throw new AppError(INAPPROPRIATE_NAME, "Nama mengandung kata kasar");
 
     const result = await base(input);
     const key = name.toLowerCase();

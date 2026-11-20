@@ -380,6 +380,8 @@ export function createAbcWordsModule(
 ) {
   const timing: AbcWordsTiming = { ...DEFAULT_TIMING, ...overrides };
   const profanity = createProfanityChecker();
+  /** Jawaban: kamus dasar, supaya "Anjing" atau "Babi" tetap sah di kategori Hewan. */
+  const answerProfanity = createProfanityChecker({ strict: false });
   const chatGuard = createChatSpamGuard({ ...DEFAULT_CHAT_SPAM_RULES, ...chatRules }, (text) => profanity.isProfane(text));
 
   /**
@@ -785,6 +787,12 @@ export function createAbcWordsModule(
           }
 
           const { category } = ctx.room.settings;
+          const verified = isVerifiedAnswer(category, key);
+          // Jawaban di daftar resmi selalu sah; sisanya tidak boleh berisi kata kasar.
+          if (!verified && answerProfanity.isProfane(cleaned)) {
+            const pause = recordRejectedAnswer(ctx, sender.userId);
+            ctx.fail("INAPPROPRIATE_ANSWER", "Jawaban mengandung kata kasar", pause);
+          }
           const sameKey = sameAnswerKey(category, key);
           const existing = state.answers.find((a) => a.key === sameKey);
           if (existing) {
@@ -803,7 +811,7 @@ export function createAbcWordsModule(
             key: sameKey,
             at: now,
             ms: now - state.answeringStartedAt!,
-            verified: isVerifiedAnswer(category, key),
+            verified,
             rejectedBy: [],
             accepted: null,
             points: null,

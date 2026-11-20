@@ -54,6 +54,16 @@ describe("nama pemain", () => {
     expect((await connect(url, { name: "budi_01-x" })).session.name).toBe("budi_01-x");
   });
 
+  it("menolak nama berisi kata kasar, juga dengan angka atau tanda di belakangnya", async () => {
+    const url = await start();
+    for (const name of ["kontol", "Bangsat99", "anjing_01", "b4bi", "fuck-you"]) {
+      expect(await rejection(connect(url, { name })), name).toBe("INAPPROPRIATE_NAME");
+    }
+    for (const name of ["Bangsawan", "Kucing_01", "Rizky2010"]) {
+      expect((await connect(url, { name })).session.name, name).toBe(name);
+    }
+  });
+
   it("menolak nama yang sedang dipakai (tidak peka huruf besar/kecil)", async () => {
     const url = await start();
     await connect(url, { name: "Budi" });

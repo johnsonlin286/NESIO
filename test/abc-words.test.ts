@@ -1642,6 +1642,26 @@ describe("abc-words: jawaban terverifikasi", () => {
     expect(result.answers.map((x) => x.accepted)).toEqual([true, true, true]);
   });
 
+  it("menolak jawaban berkata kasar, kecuali nama hewan seperti Celeng; tetap dihitung tebakan", async () => {
+    const [a, b] = await answering({ category: "hewan" });
+    expect(await call(a, "room:action", { action: "answer", payload: { text: "Cukimai" } })).toMatchObject({
+      ok: false,
+      error: { code: "INAPPROPRIATE_ANSWER" },
+    });
+    expect(await call(a, "room:action", { action: "answer", payload: { text: "Coli" } })).toMatchObject({
+      ok: false,
+      error: { code: "INAPPROPRIATE_ANSWER" },
+    });
+    // Penolakan ke-3 berturut-turut memberi jeda, sama seperti jawaban salah lainnya.
+    expect(await call(a, "room:action", { action: "answer", payload: { text: "Coli coli" } })).toMatchObject({
+      ok: false,
+      error: { code: "INAPPROPRIATE_ANSWER", details: { retryAfterMs: expect.any(Number) } },
+    });
+    // Kata yang kasar di chat tapi nama hewan: boleh, terverifikasi.
+    await act(b, "answer", { text: "Celeng" });
+    expect((await state(b)).answers.map((x) => [x.text, x.verified])).toEqual([["Celeng", true]]);
+  });
+
   it("semua jawaban terverifikasi: voting dilewati", async () => {
     const [a, b, c] = await answering({ category: "negara" });
     await act(a, "answer", { text: "Cina" });
