@@ -44,7 +44,9 @@ export const ANSWER_SECONDS_OPTIONS = [20, 25, 30, 35, 40] as const;
 const settingsSchema = z.object({
   historyLimit: z.number().int().min(0).max(200).default(50),
   // Semua kategori tetap punya daftar jawaban terverifikasi (lihat ./words); "custom" lewat voting.
-  category: z.enum(["hewan", "kota", "negara", "buah-sayur", "profesi", "custom"]).default("negara"),
+  category: z
+    .enum(["hewan", "kota", "negara", "buah-sayur", "profesi", "makanan-minuman", "custom"])
+    .default("negara"),
   /** Dipakai kalau `category` = "custom". */
   customCategory: z.string().transform(cleanText).pipe(z.string().max(40)).default(""),
   maxRounds: z.number().int().min(1).max(MAX_ROUNDS).default(MAX_ROUNDS),

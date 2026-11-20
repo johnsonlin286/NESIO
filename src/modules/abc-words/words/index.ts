@@ -6,6 +6,7 @@
 import buahSayur from "./buah-sayur.json" with { type: "json" };
 import hewan from "./hewan.json" with { type: "json" };
 import kota from "./kota.json" with { type: "json" };
+import makananMinuman from "./makanan-minuman.json" with { type: "json" };
 import negara from "./negara.json" with { type: "json" };
 import profesi from "./profesi.json" with { type: "json" };
 
@@ -15,6 +16,7 @@ const LISTS: Readonly<Record<string, ReadonlySet<string>>> = {
   hewan: new Set(hewan.words),
   "buah-sayur": new Set(buahSayur.words),
   profesi: new Set(profesi.words),
+  "makanan-minuman": new Set(makananMinuman.words),
 };
 
 /** Kategori yang punya daftar jawaban terverifikasi. */
@@ -23,6 +25,7 @@ export const VERIFIED_CATEGORIES = Object.keys(LISTS);
 /** Nama lain -> nama utama per kategori ("amerika" -> "amerika serikat"); dibuat oleh script daftarnya. */
 const SAME: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   negara: negara.same,
+  "makanan-minuman": makananMinuman.same,
 };
 
 /** `key` adalah kunci jawaban (lihat `answerKey`). */

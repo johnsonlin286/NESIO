@@ -1713,6 +1713,19 @@ describe("abc-words: jawaban terverifikasi", () => {
     ]);
   });
 
+  it("makanan & minuman: satu kata terverifikasi; ejaan lain makanan yang sama dihitung kembar", async () => {
+    const [a, b, c] = await answering({ category: "makanan-minuman" });
+    await act(a, "answer", { text: "Cendol" });
+    expect(await act(b, "answer", { text: "Coklat" })).toMatchObject({ status: "accepted" });
+    expect(await act(c, "answer", { text: "Cokelat" })).toMatchObject({ status: "near-tie" });
+    await act(c, "answer", { text: "Cireng isi" }); // dua kata: lewat voting
+    expect((await state(a)).answers.map((x) => [x.text, x.verified])).toEqual([
+      ["Cendol", true],
+      ["Coklat", true],
+      ["Cireng Isi", false],
+    ]);
+  });
+
   it("kategori tanpa daftar dan nama bahasa Inggris tidak terverifikasi", async () => {
     const [a] = await answering({ category: "custom", customCategory: "Benda" });
     await act(a, "answer", { text: "Cina" });
