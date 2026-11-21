@@ -1,0 +1,21 @@
+# Postgres untuk development lokal: `docker compose up -d`.
+# Port 5433 di host supaya tidak bentrok dengan Postgres lain di mesin ini.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: abc
+      POSTGRES_PASSWORD: abc_dev
+      POSTGRES_DB: abc_words
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U abc -d abc_words"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

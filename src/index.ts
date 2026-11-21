@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import { loadConfig } from "./config/env.js";
 import { createLogger } from "./lib/logger.js";
 import { modules } from "./modules/index.js";
+import { createAppAuthFromEnv } from "./project/auth/index.js";
 import { createAbcWordsServer } from "./project/server.js";
 
 dotenv.config({ quiet: true });
@@ -13,10 +14,14 @@ if (config.auth.mode === "guest" && !process.env.SESSION_SECRET) {
   logger.warn("SESSION_SECRET belum diisi, memakai secret development. JANGAN dipakai di production.");
 }
 
-const server = createAbcWordsServer(config, logger);
+const appAuth = await createAppAuthFromEnv(logger);
+const server = createAbcWordsServer(config, logger, undefined, { appAuth });
 
 const port = await server.start();
-logger.info({ port, env: config.env, auth: config.auth.mode, modules: modules.map((m) => m.type) }, "server ready");
+logger.info(
+  { port, env: config.env, auth: config.auth.mode, appAuth: appAuth !== null, modules: modules.map((m) => m.type) },
+  "server ready",
+);
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {

@@ -211,3 +211,49 @@ export interface ServerToClientEvents {
    */
   "rooms:changed": () => void;
 }
+
+// ---------------------------------------------------------------------------
+// (ABC Lima Dasar) REST /api/auth: login aplikasi Android dengan Google.
+// Pemain web tetap guest. Semua response memakai `{ ok, data | error }`.
+//
+//   POST   /api/auth/google   { idToken }       -> AuthSession
+//   POST   /api/auth/refresh  { refreshToken }  -> AuthSession (refresh token lama tidak berlaku lagi)
+//   POST   /api/auth/logout   { refreshToken }  -> null
+//   GET    /api/auth/me       Bearer access     -> AuthUser
+//   DELETE /api/auth/me       Bearer access     -> null (hapus akun)
+//
+// Socket.IO: kirim access token lewat `auth.token`. Refresh hanya boleh berjalan satu per satu
+// (single-flight): refresh token yang sama dipakai dua kali dianggap bocor dan sesi dicabut.
+// ---------------------------------------------------------------------------
+
+export interface AuthUser {
+  id: string;
+  email: string | null;
+  /** Nama pemain pilihan sendiri; null sampai diisi di aplikasi. */
+  displayName: string | null;
+  /** Epoch ms. */
+  createdAt: number;
+}
+
+export interface AuthTokens {
+  accessToken: string;
+  /** Epoch ms. */
+  accessTokenExpiresAt: number;
+  refreshToken: string;
+  /** Epoch ms. */
+  refreshTokenExpiresAt: number;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  tokens: AuthTokens;
+}
+
+export interface GoogleLoginInput {
+  /** ID token dari Google Sign-In (audience = Web client ID). */
+  idToken: string;
+}
+
+export interface RefreshTokenInput {
+  refreshToken: string;
+}

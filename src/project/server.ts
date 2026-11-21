@@ -5,6 +5,7 @@ import { MemoryRoomStore } from "../core/store/memory-room-store.js";
 import { createLogger, type Logger } from "../lib/logger.js";
 import { modules as defaultModules } from "../modules/index.js";
 import { createRoomServer, type RoomServer } from "../server.js";
+import { authRouter, createAppAuthenticator, type AppAuth } from "./auth/index.js";
 import { startGameClock } from "./game-clock.js";
 import { LobbyAwareRoomStore } from "./lobby-store.js";
 import { createPlayerNameGuard } from "./player-names.js";
@@ -12,17 +13,18 @@ import { createPlayerNameGuard } from "./player-names.js";
 /**
  * Room server dengan aturan khusus ABC Lima Dasar:
  * nama pemain unik & aman, sinyal `rooms:changed` untuk daftar room lobby,
- * dan jam yang memajukan fase game.
+ * jam yang memajukan fase game, dan login aplikasi Android (`appAuth`, opsional)
+ * di samping pemain web yang tetap guest.
  */
 export function createAbcWordsServer(
   config: AppConfig,
   logger: Logger = createLogger(config),
   modules: AnyRoomModule[] = defaultModules,
-  { hostAwayMs = 5_000 }: { hostAwayMs?: number } = {},
+  { hostAwayMs = 5_000, appAuth = null }: { hostAwayMs?: number; appAuth?: AppAuth | null } = {},
 ): RoomServer {
   const store = new LobbyAwareRoomStore(new MemoryRoomStore(), () => server.io.emit("rooms:changed"));
   const names = createPlayerNameGuard({
-    base: createAuthenticatorFromConfig(config.auth),
+    base: createAppAuthenticator(createAuthenticatorFromConfig(config.auth), appAuth?.service ?? null),
     store,
     io: () => server.io,
   });
@@ -32,6 +34,7 @@ export function createAbcWordsServer(
     store,
     logger,
     authenticator: names.authenticate,
+    registerRoutes: (app) => app.use("/api/auth", authRouter(appAuth?.service ?? null)),
   });
   names.attach(server.io);
 
@@ -41,6 +44,7 @@ export function createAbcWordsServer(
     stop: async () => {
       stopClock();
       await server.stop();
+      await appAuth?.close();
     },
   };
 }
