@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, gt, isNull, lt } from "drizzle-orm";
-import { Errors } from "../../lib/errors.js";
+import { and, eq, gt, isNull, lt, sql } from "drizzle-orm";
+import { AppError, Errors } from "../../lib/errors.js";
 import type { AuthSession, AuthTokens, AuthUser } from "../../shared/contract.js";
 import type { Database } from "../db/client.js";
 import { refreshTokens, users, type UserRow } from "../db/schema.js";
+import { NAME_TAKEN } from "../player-names.js";
 import type { GoogleVerifier } from "./google.js";
 import { generateRefreshToken, hashRefreshToken, secretKey, signAccessToken, verifyAccessToken } from "./tokens.js";
 
@@ -119,6 +120,33 @@ export class AuthService {
     return user ? toAuthUser(user) : null;
   }
 
+  /**
+   * Simpan nama pemain milik akun. Validasi format dan kata kasar dilakukan pemanggil (route).
+   * Unik tanpa membedakan huruf besar/kecil; indeks unik di database menutup race dua akun
+   * yang memilih nama sama bersamaan.
+   */
+  async setDisplayName(userId: string, name: string): Promise<AuthUser> {
+    const owner = await this.findUserIdByName(name);
+    if (owner && owner !== userId) throw nameTaken();
+    try {
+      const [user] = await this.db.update(users).set({ displayName: name }).where(eq(users.id, userId)).returning();
+      if (!user) throw Errors.unauthorized("Akun tidak ditemukan");
+      return toAuthUser(user);
+    } catch (error) {
+      if (isUniqueViolation(error)) throw nameTaken();
+      throw error;
+    }
+  }
+
+  /** Akun pemilik nama ini (tanpa membedakan huruf besar/kecil), atau null. */
+  async findUserIdByName(name: string): Promise<string | null> {
+    const [row] = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(sql`lower(${users.displayName})`, name.toLowerCase()));
+    return row?.id ?? null;
+  }
+
   /** Id user dari access token; UNAUTHORIZED kalau tidak valid atau kedaluwarsa. */
   verifyAccessToken(token: string): Promise<string> {
     return verifyAccessToken(token, this.key);
@@ -158,6 +186,18 @@ export class AuthService {
       .set({ revokedAt: now })
       .where(and(eq(refreshTokens.familyId, familyId), isNull(refreshTokens.revokedAt)));
   }
+}
+
+function nameTaken(): AppError {
+  return new AppError(NAME_TAKEN, "Nama ini sudah dipakai pemain lain. Pilih nama lain.");
+}
+
+/** Postgres unique_violation (23505), langsung dari driver atau dibungkus Drizzle (`cause`). */
+function isUniqueViolation(error: unknown): boolean {
+  for (let e: unknown = error; e && typeof e === "object"; e = (e as { cause?: unknown }).cause) {
+    if ((e as { code?: unknown }).code === "23505") return true;
+  }
+  return false;
 }
 
 function toAuthUser(user: UserRow): AuthUser {

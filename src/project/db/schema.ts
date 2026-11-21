@@ -1,4 +1,5 @@
-import { index, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7,16 +8,22 @@ const timestamps = {
 /**
  * Akun aplikasi Android (login Google). Pemain web tetap guest dan tidak punya baris di sini.
  * Data seminimal mungkin: id Google (`sub`) untuk login, email untuk kontak/dukungan.
+ * `display_name` adalah nama pemain milik akun: unik tanpa membedakan huruf besar/kecil, dan tamu
+ * web tidak boleh memakainya.
  */
-export const users = pgTable("users", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  googleSub: text("google_sub").notNull().unique(),
-  email: text("email"),
-  /** Nama pemain pilihan sendiri; diisi di aplikasi setelah login pertama. */
-  displayName: text("display_name"),
-  ...timestamps,
-  lastLoginAt: timestamp("last_login_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    googleSub: text("google_sub").notNull().unique(),
+    email: text("email"),
+    /** Nama pemain pilihan sendiri; diisi di aplikasi setelah login pertama. */
+    displayName: text("display_name"),
+    ...timestamps,
+    lastLoginAt: timestamp("last_login_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("users_display_name_lower_idx").on(sql`lower(${table.displayName})`)],
+);
 
 /**
  * Refresh token: yang disimpan hanya hash SHA-256-nya. Setiap refresh memakai token sekali

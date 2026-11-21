@@ -1,12 +1,19 @@
 import { Router, type Request } from "express";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
-import { Errors } from "../../lib/errors.js";
+import { AppError, Errors } from "../../lib/errors.js";
 import { parseOrThrow } from "../../lib/validation.js";
+import { INAPPROPRIATE_NAME, INVALID_NAME, isInappropriateName, isValidPlayerName, NAME_TAKEN } from "../player-names.js";
 import type { AuthService } from "./service.js";
 
 const googleLoginSchema = z.object({ idToken: z.string().min(1).max(4096) });
 const refreshTokenSchema = z.object({ refreshToken: z.string().min(1).max(256) });
+const displayNameSchema = z.object({ name: z.string().trim().max(64) });
+
+export interface AuthRouterOptions {
+  /** True kalau pemain LAIN sedang online dengan nama ini (tamu web, atau masih di room). */
+  nameInUse?: (name: string, userId: string) => Promise<boolean>;
+}
 
 function bearerToken(req: Request): string {
   const header = req.get("authorization") ?? "";
@@ -19,7 +26,7 @@ function bearerToken(req: Request): string {
  * /api/auth untuk aplikasi Android. Tanpa `service` (DATABASE_URL kosong) semua endpoint menjawab
  * 503, supaya server tetap bisa dipakai pemain web.
  */
-export function authRouter(service: AuthService | null): Router {
+export function authRouter(service: AuthService | null, { nameInUse }: AuthRouterOptions = {}): Router {
   const router = Router();
 
   router.use((_req, res, next) => {
@@ -66,6 +73,18 @@ export function authRouter(service: AuthService | null): Router {
     const user = await service.getUser(userId);
     if (!user) throw Errors.unauthorized("Akun tidak ditemukan");
     res.json({ ok: true, data: user });
+  });
+
+  /** Pilih atau ganti nama pemain milik akun (aturan sama dengan handshake, lihat player-names.ts). */
+  router.put("/me/name", async (req, res) => {
+    const userId = await service.verifyAccessToken(bearerToken(req));
+    const { name } = parseOrThrow(displayNameSchema, req.body);
+    if (!isValidPlayerName(name)) throw new AppError(INVALID_NAME, "Nama 3–20 karakter: huruf, angka, _ atau -.");
+    if (isInappropriateName(name)) throw new AppError(INAPPROPRIATE_NAME, "Nama mengandung kata yang tidak pantas.");
+    if (await nameInUse?.(name, userId)) {
+      throw new AppError(NAME_TAKEN, "Nama ini sedang dipakai pemain lain. Pilih nama lain.");
+    }
+    res.json({ ok: true, data: await service.setDisplayName(userId, name) });
   });
 
   router.delete("/me", async (req, res) => {

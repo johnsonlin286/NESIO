@@ -220,6 +220,8 @@ export interface ServerToClientEvents {
 //   POST   /api/auth/refresh  { refreshToken }  -> AuthSession (refresh token lama tidak berlaku lagi)
 //   POST   /api/auth/logout   { refreshToken }  -> null
 //   GET    /api/auth/me       Bearer access     -> AuthUser
+//   PUT    /api/auth/me/name  Bearer, { name }  -> AuthUser (nama milik akun; error INVALID_NAME,
+//                                                 INAPPROPRIATE_NAME atau NAME_TAKEN)
 //   DELETE /api/auth/me       Bearer access     -> null (hapus akun)
 //
 // Socket.IO: kirim access token lewat `auth.token`. Refresh hanya boleh berjalan satu per satu
@@ -256,4 +258,9 @@ export interface GoogleLoginInput {
 
 export interface RefreshTokenInput {
   refreshToken: string;
+}
+
+export interface DisplayNameInput {
+  /** 3–20 karakter: huruf, angka, _ atau -. Unik tanpa membedakan huruf besar/kecil. */
+  name: string;
 }

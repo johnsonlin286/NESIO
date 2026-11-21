@@ -24,7 +24,7 @@ export function createAbcWordsServer(
 ): RoomServer {
   const store = new LobbyAwareRoomStore(new MemoryRoomStore(), () => server.io.emit("rooms:changed"));
   const names = createPlayerNameGuard({
-    base: createAppAuthenticator(createAuthenticatorFromConfig(config.auth), appAuth?.service ?? null),
+    base: createAppAuthenticator(createAuthenticatorFromConfig(config.auth), appAuth?.service ?? null, logger),
     store,
     io: () => server.io,
   });
@@ -34,7 +34,16 @@ export function createAbcWordsServer(
     store,
     logger,
     authenticator: names.authenticate,
-    registerRoutes: (app) => app.use("/api/auth", authRouter(appAuth?.service ?? null)),
+    registerRoutes: (app) =>
+      app.use(
+        "/api/auth",
+        authRouter(appAuth?.service ?? null, {
+          nameInUse: async (name, userId) => {
+            const holder = await names.holderOf(name);
+            return holder !== null && holder !== userId;
+          },
+        }),
+      ),
   });
   names.attach(server.io);
 

@@ -31,6 +31,9 @@ export function isInappropriateName(name: string): boolean {
   return nameProfanity.isProfane(name) || nameProfanity.isProfane(name.replace(/[\d_-]+/g, " "));
 }
 
+/** Claim identity berisi nama pemain milik akun aplikasi (lihat auth/authenticator.ts). */
+export const ACCOUNT_NAME_CLAIM = "accountName";
+
 /** Klaim singkat untuk menutup race dua handshake bersamaan dengan nama yang sama. */
 const HANDSHAKE_CLAIM_MS = 5_000;
 
@@ -49,6 +52,8 @@ export interface PlayerNameGuardOptions {
 
 export interface PlayerNameGuard {
   authenticate: Authenticator;
+  /** userId pemain yang sedang memakai nama ini (online, di room, atau handshake berjalan), atau null. */
+  holderOf(name: string): Promise<string | null>;
   /** Pasang listener koneksi: lepas klaim handshake & buang `displayName` override. */
   attach(io: AppServer): void;
 }
@@ -78,12 +83,14 @@ export function createPlayerNameGuard({ base, store, io, now = Date.now }: Playe
   }
 
   const authenticate: Authenticator = async (input) => {
-    const name = input.auth.name;
+    const result = await base(input);
+    // Akun aplikasi memakai nama miliknya (claim ACCOUNT_NAME_CLAIM); tamu web memakai nama di handshake.
+    const accountName = result.identity.claims?.[ACCOUNT_NAME_CLAIM];
+    const name = typeof accountName === "string" ? accountName : input.auth.name;
     // Mode guest tanpa nama akan memberi nama "Guest-XXXX"; ABC Lima Dasar mewajibkan nama sendiri.
     if (!name || !isValidPlayerName(name)) throw new AppError(INVALID_NAME, "Nama tidak valid");
     if (isInappropriateName(name)) throw new AppError(INAPPROPRIATE_NAME, "Nama mengandung kata kasar");
 
-    const result = await base(input);
     const key = name.toLowerCase();
     const holder = await holderOf(key);
     if (holder && holder !== result.identity.userId) throw new AppError(NAME_TAKEN, "Nama sudah dipakai");
@@ -105,7 +112,7 @@ export function createPlayerNameGuard({ base, store, io, now = Date.now }: Playe
     });
   };
 
-  return { authenticate, attach };
+  return { authenticate, attach, holderOf: (name) => holderOf(name.toLowerCase()) };
 }
 
 /**

@@ -234,7 +234,10 @@ describe("/api/auth dan handshake Socket.IO", () => {
     const url = await startAuthServer(service);
     const { user, tokens } = await service.loginWithGoogle(await googleIdToken());
 
-    const app = await connect(url, { token: tokens.accessToken, name: "Budi" });
+    // Belum memilih nama: belum boleh main.
+    await expect(connect(url, { token: tokens.accessToken, name: "Budi" })).rejects.toThrow("INVALID_NAME");
+    await service.setDisplayName(user.id, "Budi");
+    const app = await connect(url, { token: tokens.accessToken });
     expect(app.session.userId).toBe(user.id);
     expect(app.session.name).toBe("Budi");
     expect(app.session.sessionToken).toBeNull();
@@ -248,7 +251,8 @@ describe("/api/auth dan handshake Socket.IO", () => {
   it("akun yang dihapus tidak bisa connect lagi walaupun access token belum kedaluwarsa", async () => {
     const service = newService();
     const url = await startAuthServer(service);
-    const { tokens } = await service.loginWithGoogle(await googleIdToken());
+    const { user, tokens } = await service.loginWithGoogle(await googleIdToken());
+    await service.setDisplayName(user.id, "Budi");
 
     expect((await api(url, "/api/auth/me", { method: "DELETE", token: tokens.accessToken })).status).toBe(200);
     await expect(connect(url, { token: tokens.accessToken, name: "Budi" })).rejects.toThrow();
@@ -262,5 +266,60 @@ describe("/api/auth dan handshake Socket.IO", () => {
     expect(response.json.error.code).toBe("AUTH_DISABLED");
     await expect(connect(url, { token: "apa-saja", name: "Budi" })).rejects.toThrow();
     expect((await connect(url, { name: "Sari" })).session.userId).toBeTruthy();
+  });
+});
+
+describe("nama pemain milik akun", () => {
+  async function signedIn(url: string, sub: string) {
+    const login = await api<AuthSession>(url, "/api/auth/google", { body: { idToken: await googleIdToken({ sub }) } });
+    return login.json.data.tokens.accessToken;
+  }
+  const setName = (url: string, token: string, name: string) =>
+    api<AuthUser>(url, "/api/auth/me/name", { method: "PUT", body: { name }, token });
+
+  it("menyimpan nama, menolak nama tidak valid dan kasar", async () => {
+    const url = await startAuthServer(newService());
+    const token = await signedIn(url, "google-a");
+
+    const saved = await setName(url, token, "Budi_90");
+    expect(saved.status).toBe(200);
+    expect(saved.json.data.displayName).toBe("Budi_90");
+    expect((await setName(url, token, "Budi_90")).status).toBe(200); // nama sendiri boleh disimpan lagi
+
+    expect((await setName(url, token, "ab")).json.error.code).toBe("INVALID_NAME");
+    expect((await setName(url, token, "nama spasi")).json.error.code).toBe("INVALID_NAME");
+    expect((await setName(url, token, "kontol123")).json.error.code).toBe("INAPPROPRIATE_NAME");
+    expect((await api(url, "/api/auth/me/name", { method: "PUT", body: { name: "Budi" } })).status).toBe(401);
+  });
+
+  it("nama unik tanpa membedakan huruf besar/kecil", async () => {
+    const url = await startAuthServer(newService());
+    const a = await signedIn(url, "google-a");
+    const b = await signedIn(url, "google-b");
+
+    expect((await setName(url, a, "Budi")).status).toBe(200);
+    expect((await setName(url, b, "bUDI")).json.error.code).toBe("NAME_TAKEN");
+    // Setelah A ganti nama, "Budi" bebas lagi.
+    expect((await setName(url, a, "Budiman")).status).toBe(200);
+    expect((await setName(url, b, "budi")).status).toBe(200);
+  });
+
+  it("tamu web tidak bisa memakai nama milik akun; pemilik akun memakai namanya", async () => {
+    const service = newService();
+    const url = await startAuthServer(service);
+    const { user, tokens } = await service.loginWithGoogle(await googleIdToken());
+    await service.setDisplayName(user.id, "Budi");
+
+    await expect(connect(url, { name: "budi" })).rejects.toThrow("NAME_TAKEN");
+    const app = await connect(url, { token: tokens.accessToken, name: "NamaLain" });
+    expect(app.session.name).toBe("Budi");
+    expect((await connect(url, { name: "Sari" })).session.userId).toBeTruthy();
+  });
+
+  it("tidak bisa mengambil nama yang sedang dipakai tamu online", async () => {
+    const url = await startAuthServer(newService());
+    await connect(url, { name: "Joko" });
+    const token = await signedIn(url, "google-a");
+    expect((await setName(url, token, "joko")).json.error.code).toBe("NAME_TAKEN");
   });
 });
