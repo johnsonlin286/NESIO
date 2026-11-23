@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -21,6 +21,9 @@ export const users = pgTable(
     displayName: text("display_name"),
     ...timestamps,
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Kunci room saat `room_keys_updated_at` (lihat project/keys/rules.ts). Akun baru mulai penuh. */
+    roomKeys: integer("room_keys").notNull().default(5),
+    roomKeysUpdatedAt: timestamp("room_keys_updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("users_display_name_lower_idx").on(sql`lower(${table.displayName})`)],
 );

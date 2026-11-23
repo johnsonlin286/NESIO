@@ -4,6 +4,7 @@ import { z } from "zod";
 import { AppError, Errors } from "../../lib/errors.js";
 import { parseOrThrow } from "../../lib/validation.js";
 import { INAPPROPRIATE_NAME, INVALID_NAME, isInappropriateName, isValidPlayerName, NAME_TAKEN } from "../player-names.js";
+import type { RoomKeyService } from "../keys/service.js";
 import type { AuthService } from "./service.js";
 
 const googleLoginSchema = z.object({ idToken: z.string().min(1).max(4096) });
@@ -13,6 +14,8 @@ const displayNameSchema = z.object({ name: z.string().trim().max(64) });
 export interface AuthRouterOptions {
   /** True kalau pemain LAIN sedang online dengan nama ini (tamu web, atau masih di room). */
   nameInUse?: (name: string, userId: string) => Promise<boolean>;
+  /** Kunci room akun (GET /me/keys). */
+  keys?: RoomKeyService;
 }
 
 function bearerToken(req: Request): string {
@@ -26,7 +29,7 @@ function bearerToken(req: Request): string {
  * /api/auth untuk aplikasi Android. Tanpa `service` (DATABASE_URL kosong) semua endpoint menjawab
  * 503, supaya server tetap bisa dipakai pemain web.
  */
-export function authRouter(service: AuthService | null, { nameInUse }: AuthRouterOptions = {}): Router {
+export function authRouter(service: AuthService | null, { nameInUse, keys }: AuthRouterOptions = {}): Router {
   const router = Router();
 
   router.use((_req, res, next) => {
@@ -85,6 +88,13 @@ export function authRouter(service: AuthService | null, { nameInUse }: AuthRoute
       throw new AppError(NAME_TAKEN, "Nama ini sedang dipakai pemain lain. Pilih nama lain.");
     }
     res.json({ ok: true, data: await service.setDisplayName(userId, name) });
+  });
+
+  /** Jumlah kunci room sekarang dan kapan kunci berikutnya datang (dihitung dengan jam server). */
+  router.get("/me/keys", async (req, res) => {
+    const userId = await service.verifyAccessToken(bearerToken(req));
+    if (!keys) throw Errors.internal();
+    res.json({ ok: true, data: await keys.status(userId) });
   });
 
   router.delete("/me", async (req, res) => {

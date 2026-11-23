@@ -38,6 +38,7 @@ export function createAbcWordsServer(
       app.use(
         "/api/auth",
         authRouter(appAuth?.service ?? null, {
+          ...(appAuth && { keys: appAuth.keys }),
           nameInUse: async (name, userId) => {
             const holder = await names.holderOf(name);
             return holder !== null && holder !== userId;

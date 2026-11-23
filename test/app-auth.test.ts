@@ -7,6 +7,7 @@ import { loadConfig } from "../src/config/env.js";
 import { createLogger } from "../src/lib/logger.js";
 import { AuthService, type AppAuth } from "../src/project/auth/index.js";
 import { createGoogleVerifier } from "../src/project/auth/google.js";
+import { RoomKeyService } from "../src/project/keys/service.js";
 import { MIGRATIONS_FOLDER, type Database } from "../src/project/db/client.js";
 import * as schema from "../src/project/db/schema.js";
 import { createAbcWordsServer } from "../src/project/server.js";
@@ -81,7 +82,11 @@ function googleIdToken({
 
 async function startAuthServer(service: AuthService | null) {
   const config = loadConfig({ NODE_ENV: "test", HOST: "127.0.0.1", PORT: "0", LOG_LEVEL: "silent" });
-  const appAuth: AppAuth | null = service && { service, close: async () => {} };
+  const appAuth: AppAuth | null = service && {
+    service,
+    keys: new RoomKeyService(db, undefined, () => clock),
+    close: async () => {},
+  };
   const server = createAbcWordsServer(config, createLogger(config), undefined, { appAuth });
   const port = await server.start();
   servers.push(server);
@@ -321,5 +326,17 @@ describe("nama pemain milik akun", () => {
     await connect(url, { name: "Joko" });
     const token = await signedIn(url, "google-a");
     expect((await setName(url, token, "joko")).json.error.code).toBe("NAME_TAKEN");
+  });
+});
+
+describe("/api/auth/me/keys", () => {
+  it("akun baru punya kunci penuh; butuh login", async () => {
+    const url = await startAuthServer(newService());
+    const login = await api<AuthSession>(url, "/api/auth/google", { body: { idToken: await googleIdToken() } });
+    const keys = await api<{ count: number; max: number; nextAt: number | null }>(url, "/api/auth/me/keys", {
+      token: login.json.data.tokens.accessToken,
+    });
+    expect(keys.json.data).toMatchObject({ count: 5, max: 5, nextAt: null });
+    expect((await api(url, "/api/auth/me/keys")).status).toBe(401);
   });
 });

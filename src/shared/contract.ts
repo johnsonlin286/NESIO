@@ -222,6 +222,7 @@ export interface ServerToClientEvents {
 //   GET    /api/auth/me       Bearer access     -> AuthUser
 //   PUT    /api/auth/me/name  Bearer, { name }  -> AuthUser (nama milik akun; error INVALID_NAME,
 //                                                 INAPPROPRIATE_NAME atau NAME_TAKEN)
+//   GET    /api/auth/me/keys  Bearer access     -> RoomKeyStatus (kunci room)
 //   DELETE /api/auth/me       Bearer access     -> null (hapus akun)
 //
 // Socket.IO: kirim access token lewat `auth.token`. Refresh hanya boleh berjalan satu per satu
@@ -263,4 +264,17 @@ export interface RefreshTokenInput {
 export interface DisplayNameInput {
   /** 3–20 karakter: huruf, angka, _ atau -. Unik tanpa membedakan huruf besar/kecil. */
   name: string;
+}
+
+/**
+ * (ABC Lima Dasar) Kunci room akun aplikasi: host memakai satu saat memulai permainan, bergabung
+ * gratis. Aturan isi ulang ada di `ROOM_KEYS` (backend/src/project/keys/rules.ts).
+ */
+export interface RoomKeyStatus {
+  count: number;
+  max: number;
+  /** Epoch ms kunci berikutnya datang (jam server), atau null kalau penuh. */
+  nextAt: number | null;
+  /** Jam server saat dijawab (epoch ms): client menghitung mundur dari selisih ini, bukan jam HP. */
+  serverNow: number;
 }

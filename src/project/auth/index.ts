@@ -1,5 +1,6 @@
 import type { Logger } from "../../lib/logger.js";
 import { connectDatabase } from "../db/client.js";
+import { RoomKeyService } from "../keys/service.js";
 import { loadAppAuthConfig } from "./config.js";
 import { createGoogleVerifier } from "./google.js";
 import { AuthService } from "./service.js";
@@ -12,6 +13,7 @@ const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export interface AppAuth {
   service: AuthService;
+  keys: RoomKeyService;
   close(): Promise<void>;
 }
 
@@ -45,6 +47,7 @@ export async function createAppAuthFromEnv(logger: Logger, env: NodeJS.ProcessEn
 
   return {
     service,
+    keys: new RoomKeyService(database.db),
     close: async () => {
       clearInterval(prune);
       await database.close();
