@@ -267,8 +267,20 @@ export interface DisplayNameInput {
 }
 
 /**
- * (ABC Lima Dasar) Kunci room akun aplikasi: host memakai satu saat memulai permainan, bergabung
- * gratis. Aturan isi ulang ada di `ROOM_KEYS` (backend/src/project/keys/rules.ts).
+ * (ABC Lima Dasar) Daftar lobby untuk aplikasi:
+ *
+ *   GET /api/abc-words/rooms        -> LobbyRoom[] (room yang bisa dimulai lebih dulu, terbaru di atas)
+ *   GET /api/abc-words/rooms/:code  -> LobbyRoom
+ */
+export interface LobbyRoom extends RoomSummary {
+  /** Belum bermain dan host-nya (akun aplikasi) tidak punya kunci, jadi belum bisa dimulai. */
+  hostNeedsKey: boolean;
+}
+
+/**
+ * (ABC Lima Dasar) Kunci room akun aplikasi: membuat room butuh minimal satu, host memakai satu
+ * setiap memulai permainan (error NO_ROOM_KEYS), bergabung gratis. Aturan isi ulang ada di
+ * `ROOM_KEYS` (backend/src/project/keys/rules.ts).
  */
 export interface RoomKeyStatus {
   count: number;

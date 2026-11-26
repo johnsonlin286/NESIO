@@ -1,6 +1,6 @@
 /**
- * Kunci room (hanya akun aplikasi Android; tamu web tidak punya kunci). Host memakai satu kunci
- * saat memulai permainan; pemain yang bergabung gratis.
+ * Kunci room (hanya akun aplikasi Android; tamu web tidak punya kunci). Membuat room butuh minimal
+ * satu kunci dan host memakai satu setiap memulai permainan; pemain yang bergabung gratis.
  *
  * `regenMinutes[n]` = waktu dari n kunci ke n + 1, jadi isi ulang bisa dibuat makin lambat atau
  * makin cepat per tingkat hanya dengan mengubah tabel ini (tanpa migrasi data). Sama dengan
@@ -58,7 +58,7 @@ export function afterSpend(current: CurrentKeys, now: number): StoredKeys {
   return { count: current.count - 1, updatedAt: wasFull ? now : current.stored.updatedAt };
 }
 
-/** Kunci dikembalikan (permainan batal sebelum ronde pertama selesai), tidak melebihi batas. */
+/** Kunci dikembalikan (server dimatikan sebelum ronde pertama selesai), tidak melebihi batas. */
 export function afterRefund(current: CurrentKeys, now: number, schedule: KeySchedule = ROOM_KEYS): StoredKeys {
   const count = Math.min(current.count + 1, schedule.max);
   return { count, updatedAt: count >= schedule.max ? now : current.stored.updatedAt };

@@ -20,6 +20,25 @@ import { isVerifiedAnswer, sameAnswerKey } from "./words/index.js";
  */
 
 export const ROOM_TYPE = "abc-words";
+
+/**
+ * Kunci room host: membuat room butuh minimal satu, dan setiap memulai permainan memakai satu.
+ * Kunci tidak kembali, kecuali server kita dimatikan sebelum ronde pertama selesai.
+ * Implementasinya di src/project/keys (hanya akun aplikasi yang punya kunci; tamu web gratis).
+ */
+export interface HostKeys {
+  /** Gagal dengan NO_ROOM_KEYS kalau akun ini tidak punya kunci. */
+  ensureAvailable(userId: string): Promise<void>;
+  /** Pakai satu kunci; `false` kalau pemain ini gratis. Gagal dengan NO_ROOM_KEYS kalau habis. */
+  spend(userId: string): Promise<boolean>;
+  /** Tidak boleh melempar error: server tetap harus bisa berhenti. */
+  refund(userId: string): Promise<void>;
+}
+
+export interface AbcWordsDeps {
+  /** Kosong = semua permainan gratis (login aplikasi nonaktif). */
+  roomKeys?: HostKeys;
+}
 export const MAX_ROUNDS = 10;
 export const MAX_PLAYERS = 8;
 /** Host boleh memanggil (ping) pemain yang sama paling cepat sekali per selang ini (default `pingCooldownMs`). */
@@ -196,6 +215,11 @@ export interface AbcWordsState extends ChatState {
   ready: string[];
   /** Kapan host terakhir memanggil tiap pemain (lihat `pingCooldownMs`); tidak dikirim ke client. */
   pingedAt: Record<string, number>;
+  /**
+   * Akun yang membayar kunci untuk permainan ini selama ronde pertama belum selesai; hanya dipakai
+   * untuk mengembalikannya kalau server dimatikan. Tidak dikirim ke client.
+   */
+  keyPaidBy: string | null;
 }
 
 export interface AnswerSpeed {
@@ -366,6 +390,7 @@ function idleFields() {
     speed: {} as Record<string, AnswerSpeed>,
     ready: [] as string[],
     pingedAt: {} as Record<string, number>,
+    keyPaidBy: null as string | null,
     ...emptyRound(),
   };
 }
@@ -385,6 +410,7 @@ function backToWaiting(ctx: Ctx, text: string): void {
 export function createAbcWordsModule(
   overrides: Partial<AbcWordsTiming> = {},
   chatRules: Partial<ChatSpamRules> = {},
+  { roomKeys }: AbcWordsDeps = {},
 ) {
   const timing: AbcWordsTiming = { ...DEFAULT_TIMING, ...overrides };
   const profanity = createProfanityChecker();
@@ -538,6 +564,9 @@ export function createAbcWordsModule(
       });
     }
 
+    // Ronde pertama selesai: mulai sekarang kunci tidak dikembalikan walau server dimatikan.
+    if (state.round === 1) state.keyPaidBy = null;
+
     state.phase = "result";
     setDeadline(ctx, timing.resultMs);
   }
@@ -662,6 +691,7 @@ export function createAbcWordsModule(
         graceUsedBy: _graceUsedBy,
         rejectionsUsed,
         pingedAt: _pingedAt,
+        keyPaidBy: _keyPaidBy,
         ...visible
       } = state;
       return {
@@ -675,7 +705,11 @@ export function createAbcWordsModule(
       };
     },
 
-    onMemberJoin(ctx, member) {
+    async onMemberJoin(ctx, member) {
+      // Pembuat room (satu-satunya anggota, sekaligus host) harus punya kunci; bergabung selalu gratis.
+      const creating = ctx.room.members.length === 1 && member.userId === ctx.room.hostId;
+      if (creating) await roomKeys?.ensureAvailable(member.userId);
+
       pushMessage(ctx, { userId: null, name: "system", text: `${member.name} bergabung` });
     },
 
@@ -724,7 +758,7 @@ export function createAbcWordsModule(
     actions: {
       start: action({
         hostOnly: true,
-        handler(ctx) {
+        async handler(ctx) {
           const { room } = ctx;
           if (room.state.phase !== "waiting") ctx.fail("GAME_ALREADY_STARTED", "Permainan sudah berjalan");
           if (room.members.filter((m) => m.isConnected).length < MIN_PLAYERS) {
@@ -741,6 +775,9 @@ export function createAbcWordsModule(
               userIds: notReady.map((m) => m.userId),
             });
           }
+
+          // Setelah semua syarat lain lolos, supaya kunci tidak terpakai untuk permainan yang batal mulai.
+          if (await roomKeys?.spend(ctx.sender!.userId)) room.state.keyPaidBy = ctx.sender!.userId;
 
           room.state.endedReason = null;
           room.state.rejectionLimit = MAX_REJECTIONS;
@@ -989,7 +1026,10 @@ export function createAbcWordsModule(
   });
 }
 
-export const abcWordsModule = createAbcWordsModule();
+/** Pembayar kunci yang permainannya belum melewati ronde pertama (dipakai saat server berhenti). */
+export function unspentKeyHolder(room: Room): string | null {
+  return room.type === ROOM_TYPE ? (room.state as AbcWordsState).keyPaidBy : null;
+}
 
 /** Dipakai jam game untuk menemukan room yang fasenya sudah habis. */
 export function isPhaseDue(room: Room, now: number): boolean {

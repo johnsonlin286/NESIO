@@ -1,5 +1,5 @@
 import type { AnyRoomModule } from "../core/module.js";
-import { abcWordsModule } from "./abc-words/index.js";
+import { createAbcWordsModule, type AbcWordsDeps } from "./abc-words/index.js";
 import { chatModule } from "./chat/index.js";
 import { numberGuessModule } from "./number-guess/index.js";
 
@@ -10,4 +10,8 @@ import { numberGuessModule } from "./number-guess/index.js";
  * Saat fork untuk project baru: buat folder di `src/modules/<nama>/`,
  * daftarkan di sini, dan hapus contoh yang tidak dipakai.
  */
-export const modules: AnyRoomModule[] = [chatModule, numberGuessModule, abcWordsModule];
+export function createModules(deps: AbcWordsDeps = {}): AnyRoomModule[] {
+  return [chatModule, numberGuessModule, createAbcWordsModule({}, {}, deps)];
+}
+
+export const modules: AnyRoomModule[] = createModules();

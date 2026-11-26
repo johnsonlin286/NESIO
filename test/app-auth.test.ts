@@ -3,8 +3,10 @@ import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import { loadConfig } from "../src/config/env.js";
 import { createLogger } from "../src/lib/logger.js";
+import { createAbcWordsModule } from "../src/modules/abc-words/index.js";
 import { AuthService, type AppAuth } from "../src/project/auth/index.js";
 import { createGoogleVerifier } from "../src/project/auth/google.js";
 import { RoomKeyService } from "../src/project/keys/service.js";
@@ -12,8 +14,8 @@ import { MIGRATIONS_FOLDER, type Database } from "../src/project/db/client.js";
 import * as schema from "../src/project/db/schema.js";
 import { createAbcWordsServer } from "../src/project/server.js";
 import type { RoomServer } from "../src/server.js";
-import type { AuthSession, AuthUser } from "../src/shared/contract.js";
-import { cleanup, connect } from "./helpers.js";
+import type { AuthSession, AuthUser, LobbyRoom, RoomView } from "../src/shared/contract.js";
+import { call, cleanup, connect, ok, sleep, waitFor, type TestClient } from "./helpers.js";
 
 const WEB_CLIENT_ID = "test-web.apps.googleusercontent.com";
 const HOUR = 60 * 60 * 1000;
@@ -80,14 +82,17 @@ function googleIdToken({
     .sign(googleKey);
 }
 
-async function startAuthServer(service: AuthService | null) {
+async function startAuthServer(
+  service: AuthService | null,
+  modules?: Parameters<typeof createAbcWordsServer>[2],
+) {
   const config = loadConfig({ NODE_ENV: "test", HOST: "127.0.0.1", PORT: "0", LOG_LEVEL: "silent" });
   const appAuth: AppAuth | null = service && {
     service,
     keys: new RoomKeyService(db, undefined, () => clock),
     close: async () => {},
   };
-  const server = createAbcWordsServer(config, createLogger(config), undefined, { appAuth });
+  const server = createAbcWordsServer(config, createLogger(config), modules, { appAuth });
   const port = await server.start();
   servers.push(server);
   return `http://127.0.0.1:${port}`;
@@ -338,5 +343,169 @@ describe("/api/auth/me/keys", () => {
     });
     expect(keys.json.data).toMatchObject({ count: 5, max: 5, nextAt: null });
     expect((await api(url, "/api/auth/me/keys")).status).toBe(401);
+  });
+});
+
+describe("kunci room saat permainan", () => {
+  type Room = RoomView<{ phase: string; round: number; keyPaidBy?: unknown }>;
+
+  async function appPlayer(service: AuthService, url: string, sub: string, name: string) {
+    const { user, tokens } = await service.loginWithGoogle(await googleIdToken({ sub }));
+    await service.setDisplayName(user.id, name);
+    const socket = await connect(url, { token: tokens.accessToken });
+    const keys = async () =>
+      (await api<{ count: number }>(url, "/api/auth/me/keys", { token: tokens.accessToken })).json.data.count;
+    return { id: user.id, socket, keys };
+  }
+
+  /** Room 2 pemain yang siap dimulai: `host` pembuatnya. */
+  async function readyRoom(host: TestClient, guest: TestClient) {
+    const room = await ok<Room>(host, "room:create", { type: "abc-words" });
+    await ok(guest, "room:join", { roomId: room.id });
+    await ok(guest, "room:action", { action: "ready", payload: { ready: true } });
+    return room;
+  }
+
+  const start = (socket: TestClient) => call(socket, "room:action", { action: "start" });
+  const end = (socket: TestClient) => ok(socket, "room:action", { action: "end" });
+
+  async function appHostGame(modules?: Parameters<typeof createAbcWordsServer>[2]) {
+    const service = newService();
+    const url = await startAuthServer(service, modules);
+    const host = await appPlayer(service, url, "google-host", "Budi");
+    const guest = await connect(url, { name: "Sari" });
+    await readyRoom(host.socket, guest);
+    return { host, guest };
+  }
+
+  it("host aplikasi memakai satu kunci saat mulai; client tidak melihat pembayarnya", async () => {
+    const { host } = await appHostGame();
+    expect(await host.keys()).toBe(5);
+    expect((await start(host.socket)).ok).toBe(true);
+    expect(await host.keys()).toBe(4);
+    const room = await ok<Room>(host.socket, "room:sync");
+    expect(room.state.phase).toBe("picking");
+    expect(room.state).not.toHaveProperty("keyPaidBy");
+  });
+
+  it("host tamu web gratis, dan pemain aplikasi yang bergabung tidak membayar", async () => {
+    const service = newService();
+    const url = await startAuthServer(service);
+    const web = await connect(url, { name: "Sari" });
+    const app = await appPlayer(service, url, "google-a", "Budi");
+    await readyRoom(web, app.socket);
+    expect((await start(web)).ok).toBe(true);
+    await end(web);
+    expect(await app.keys()).toBe(5);
+  });
+
+  it("kunci tidak terpakai kalau syarat mulai belum lolos", async () => {
+    const { host, guest } = await appHostGame();
+    await ok(guest, "room:action", { action: "ready", payload: { ready: false } });
+    expect(await start(host.socket)).toMatchObject({ ok: false, error: { code: "PLAYERS_NOT_READY" } });
+    expect(await host.keys()).toBe(5);
+  });
+
+  it("tanpa kunci: NO_ROOM_KEYS dengan waktu kunci berikutnya, room tetap di ruang tunggu", async () => {
+    const { host } = await appHostGame();
+    await db.update(schema.users).set({ roomKeys: 0, roomKeysUpdatedAt: new Date(clock) }).where(eq(schema.users.id, host.id));
+    expect(await start(host.socket)).toMatchObject({
+      ok: false,
+      error: { code: "NO_ROOM_KEYS", details: { nextAt: clock + 30 * 60_000 } },
+    });
+    expect((await ok<Room>(host.socket, "room:sync")).state.phase).toBe("waiting");
+  });
+
+  it("mengakhiri permainan tidak mengembalikan kunci; main lagi membayar lagi", async () => {
+    const { host, guest } = await appHostGame();
+    await start(host.socket);
+    await end(host.socket);
+    expect(await host.keys()).toBe(4);
+
+    await ok(guest, "room:action", { action: "ready", payload: { ready: true } });
+    await start(host.socket);
+    expect(await host.keys()).toBe(3);
+  });
+
+  it("pemain keluar sebelum ronde pertama selesai: kunci tidak kembali", async () => {
+    const { host, guest } = await appHostGame();
+    await start(host.socket);
+    const waiting = waitFor<Room>(host.socket, "room:state", (r) => r.state.phase === "waiting");
+    await ok(guest, "room:leave");
+    await waiting;
+    expect(await host.keys()).toBe(4);
+  });
+
+  const keysAfterStop = (userId: string) => new RoomKeyService(db, undefined, () => clock).status(userId);
+
+  it("server berhenti sebelum ronde pertama selesai: kunci kembali", async () => {
+    const { host } = await appHostGame();
+    await start(host.socket);
+    await servers.pop()!.stop();
+    expect((await keysAfterStop(host.id)).count).toBe(5);
+  });
+
+  it("server berhenti setelah ronde pertama selesai: kunci tetap terpakai", async () => {
+    const fast = { pickMs: 60, revealMs: 60, answerMs: 60, votingMs: 60, resultMs: 5_000 };
+    const { host } = await appHostGame((deps) => [createAbcWordsModule(fast, {}, deps)]);
+    const result = waitFor<Room>(host.socket, "room:state", (r) => r.state.phase === "result", 4000);
+    await start(host.socket);
+    await result;
+    await servers.pop()!.stop();
+    expect((await keysAfterStop(host.id)).count).toBe(4);
+  });
+
+  const emptyKeys = (userId: string) =>
+    db.update(schema.users).set({ roomKeys: 0, roomKeysUpdatedAt: new Date(clock) }).where(eq(schema.users.id, userId));
+
+  it("tanpa kunci tidak bisa membuat room, tetapi tetap bisa bergabung", async () => {
+    const service = newService();
+    const url = await startAuthServer(service);
+    const app = await appPlayer(service, url, "google-a", "Budi");
+    await emptyKeys(app.id);
+
+    expect(await call(app.socket, "room:create", { type: "abc-words", isPublic: true })).toMatchObject({
+      ok: false,
+      error: { code: "NO_ROOM_KEYS", details: { nextAt: clock + 30 * 60_000 } },
+    });
+    // Percobaan yang ditolak tidak meninggalkan room.
+    expect((await api<unknown[]>(url, "/api/rooms")).json.data).toEqual([]);
+    expect(await ok(app.socket, "room:sync")).toBeNull();
+
+    const web = await connect(url, { name: "Sari" });
+    const room = await ok<Room>(web, "room:create", { type: "abc-words" });
+    await ok(app.socket, "room:join", { roomId: room.id });
+  });
+
+  it("daftar lobby menandai room yang host-nya kehabisan kunci dan menaruhnya di bawah", async () => {
+    const service = newService();
+    const url = await startAuthServer(service);
+    const web = await connect(url, { name: "Sari" });
+    const webRoom = await ok<Room>(web, "room:create", { type: "abc-words", isPublic: true });
+    await sleep(5); // room aplikasi harus lebih baru, supaya urutan bawah bukan karena umur
+    const app = await appPlayer(service, url, "google-a", "Budi");
+    const appRoom = await ok<Room>(app.socket, "room:create", { type: "abc-words", isPublic: true });
+    const list = async () =>
+      (await api<LobbyRoom[]>(url, "/api/abc-words/rooms")).json.data.map((r) => [r.id, r.hostNeedsKey]);
+
+    expect(await list()).toEqual([
+      [appRoom.id, false],
+      [webRoom.id, false],
+    ]);
+    await emptyKeys(app.id);
+    expect(await list()).toEqual([
+      [webRoom.id, false],
+      [appRoom.id, true],
+    ]);
+    const one = await api<LobbyRoom>(url, `/api/abc-words/rooms/${appRoom.id.toLowerCase()}`);
+    expect(one.json.data).toMatchObject({ id: appRoom.id, hostName: "Budi", hostNeedsKey: true });
+    expect((await api(url, "/api/abc-words/rooms/ZZZZZZ")).status).toBe(404);
+  });
+
+  it("tanpa database: daftar lobby tetap jalan", async () => {
+    const url = await startAuthServer(null);
+    const web = await connect(url, { name: "Sari" });
+    await ok(web, "room:create", { type: "abc-words", isPublic: true });
+    expect((await api<LobbyRoom[]>(url, "/api/abc-words/rooms")).json.data).toMatchObject([{ hostNeedsKey: false }]);
   });
 });

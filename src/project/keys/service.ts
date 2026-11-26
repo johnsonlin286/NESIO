@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { AppError, Errors } from "../../lib/errors.js";
 import type { RoomKeyStatus } from "../../shared/contract.js";
 import type { Database } from "../db/client.js";
@@ -6,6 +6,10 @@ import { users } from "../db/schema.js";
 import { afterRefund, afterSpend, currentKeys, ROOM_KEYS, type CurrentKeys, type KeySchedule } from "./rules.js";
 
 export const NO_ROOM_KEYS = "NO_ROOM_KEYS";
+
+export function noRoomKeysError(nextAt: number | null): AppError {
+  return new AppError(NO_ROOM_KEYS, "Kunci room habis. Tunggu kunci berikutnya.", { nextAt });
+}
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -36,13 +40,28 @@ export class RoomKeyService {
   spend(userId: string): Promise<RoomKeyStatus> {
     return this.update(userId, (current, now) => {
       if (current.count <= 0) {
-        throw new AppError(NO_ROOM_KEYS, "Kunci room habis. Tunggu kunci berikutnya.", { nextAt: current.nextAt });
+        throw noRoomKeysError(current.nextAt);
       }
       return afterSpend(current, now);
     });
   }
 
-  /** Kembalikan satu kunci (permainan batal sebelum ronde pertama selesai). */
+  /** Dari daftar pemain ini, akun yang sedang tidak punya kunci (tamu web tidak punya baris). */
+  async keylessAmong(userIds: string[]): Promise<Set<string>> {
+    const ids = userIds.filter((id) => UUID_PATTERN.test(id));
+    if (ids.length === 0) return new Set();
+    const rows = await this.db
+      .select({ id: users.id, count: users.roomKeys, updatedAt: users.roomKeysUpdatedAt })
+      .from(users)
+      .where(inArray(users.id, ids));
+    const now = this.now();
+    const empty = rows.filter(
+      (row) => currentKeys({ count: row.count, updatedAt: row.updatedAt.getTime() }, now, this.schedule).count === 0,
+    );
+    return new Set(empty.map((row) => row.id));
+  }
+
+  /** Kembalikan satu kunci (server dimatikan sebelum ronde pertama selesai). */
   refund(userId: string): Promise<RoomKeyStatus> {
     return this.update(userId, (current, now) => afterRefund(current, now, this.schedule));
   }
