@@ -1600,6 +1600,31 @@ describe("abc-words: AFK", () => {
     expect((await state(p0)).phase).toBe("reveal");
   });
 
+  it("pemain AFK boleh menekan Selesai menilai, tapi voting tidak menunggunya", async () => {
+    const [p0, p1, idle] = await game();
+    for (let i = 1; i <= AFK_ROUNDS; i++) {
+      await round([p0, p1], true);
+      await tick(p0);
+    }
+    await act(p0, "pick", { value: 1 });
+    await act(p1, "pick", { value: 1 });
+    await tick(p0);
+    const letter = (await state(p0)).reveal!.letter.toLowerCase();
+    await act(p0, "answer", { text: `${letter}aa` });
+    await act(p1, "answer", { text: `${letter}bb` });
+    expect((await state(p0)).phase).toBe("voting");
+
+    await act(idle, "doneVoting", { done: true });
+    const afterIdle = await state(p0);
+    expect(afterIdle.phase).toBe("voting"); // tombolnya tidak mengakhiri voting
+    expect(afterIdle.votingDone).toContain(idOf(idle));
+    expect(afterIdle.idleRounds[idOf(idle)]).toBe(AFK_ROUNDS); // tetap AFK
+
+    await act(p0, "doneVoting", { done: true });
+    await act(p1, "doneVoting", { done: true });
+    expect((await state(p0)).phase).toBe("result");
+  });
+
   it("memilih angka tapi tidak menjawab, atau sebaliknya, tidak dihitung AFK", async () => {
     const [p0, p1, idle] = await game();
     await act(idle, "pick", { value: 1 });

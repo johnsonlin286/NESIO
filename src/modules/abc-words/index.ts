@@ -389,6 +389,15 @@ function judgesOf(room: Room<AbcWordsState, AbcWordsSettings>): string[] {
     .map((m) => m.userId);
 }
 
+/**
+ * Boleh menekan "Selesai menilai": online dan ada jawaban orang lain yang belum terverifikasi.
+ * Pemain AFK juga boleh (tolakannya pun dihitung), tapi voting tidak menunggunya (`judgesOf`).
+ */
+function canJudge(room: Room<AbcWordsState, AbcWordsSettings>, userId: string): boolean {
+  const member = room.members.find((m) => m.userId === userId);
+  return !!member?.isConnected && answersToJudge(room).some((a) => a.userId !== userId);
+}
+
 function idleFields() {
   return {
     phase: "waiting" as const,
@@ -1019,7 +1028,7 @@ export function createAbcWordsModule(
           const userId = ctx.sender!.userId;
           failIfPaused(ctx);
           if (state.phase !== "voting") ctx.fail("WRONG_PHASE", "Waktu voting sudah habis");
-          if (!judgesOf(ctx.room).includes(userId)) ctx.fail("NOTHING_TO_JUDGE", "Tidak ada jawaban untuk kamu nilai");
+          if (!canJudge(ctx.room, userId)) ctx.fail("NOTHING_TO_JUDGE", "Tidak ada jawaban untuk kamu nilai");
 
           const index = state.votingDone.indexOf(userId);
           if (done && index < 0) state.votingDone.push(userId);
