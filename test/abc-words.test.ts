@@ -10,13 +10,15 @@ import {
 } from "../src/modules/abc-words/index.js";
 import { createAbcWordsServer } from "../src/project/server.js";
 import type { RoomSummary, RoomView } from "../src/shared/contract.js";
-import { call, cleanup, connect, ok, sleep, startServer, waitFor } from "./helpers.js";
+import { call, cleanup, connect, ok, sleep, startServer, waitFor, type TestClient } from "./helpers.js";
 
 afterEach(cleanup);
 
 /** Bentuk `state` yang diterima client (lihat `serializeState`). */
-type ClientState = Omit<AbcWordsState, "picks" | "deadline"> & {
+type ClientState = Omit<AbcWordsState, "picks" | "deadline" | "pause" | "abandonAt"> & {
   remainingMs: number | null;
+  paused: boolean;
+  waitingForPlayersMs: number | null;
   pickedBy: string[];
   myPick: number | null;
   rejectionsLeft: number;
@@ -433,6 +435,114 @@ describe("abc-words: pilih angka dan huruf", () => {
   });
 });
 
+describe("abc-words: jeda saat pemain kurang", () => {
+  const env = { RECONNECT_GRACE_MS: "10000" };
+
+  async function game(timing: Parameters<typeof createAbcWordsModule>[0], guests = 1, settings = {}) {
+    const module = createAbcWordsModule({ abandonMs: 5_000, resumeMinMs: 0, minAnswerMs: 0, ...timing });
+    const { url } = await startServer(env, [module]);
+    const host = await connect(url, { name: "Host" });
+    const room = await ok<GameRoom>(host, "room:create", { type: "abc-words", isPublic: true, settings });
+    const others: TestClient[] = [];
+    for (let i = 0; i < guests; i++) {
+      const guest = await connect(url, { name: `Tamu${i}` });
+      await joinReady(guest, room.id);
+      others.push(guest);
+    }
+    await ok(host, "room:action", { action: "start" });
+    const state = async () => (await ok<GameRoom>(host, "room:sync")).state;
+    const drop = async (socket: (typeof others)[number]) => {
+      socket.disconnect();
+      await sleep(60);
+    };
+    const comeBack = async (socket: (typeof others)[number]) => {
+      const back = await connect(url, { name: socket.session.name, sessionToken: socket.session.sessionToken! });
+      await sleep(40);
+      return back;
+    };
+    return { host, guests: others, guest: others[0]!, state, drop, comeBack };
+  }
+  const act = (socket: Parameters<typeof ok>[0], action: string, payload?: unknown) =>
+    call(socket, "room:action", { action, ...(payload !== undefined && { payload }) });
+
+  it("dijeda: fase tidak maju, aksi ditolak tapi chat jalan, lalu lanjut dengan sisa waktu", async () => {
+    const { host, guest, state, drop, comeBack } = await game({ pickMs: 600 });
+    await drop(guest);
+
+    expect(await state()).toMatchObject({ phase: "picking", paused: true, remainingMs: null });
+    expect((await state()).waitingForPlayersMs).toBeGreaterThan(4_000);
+    expect(await act(host, "pick", { value: 3 })).toMatchObject({ ok: false, error: { code: "GAME_PAUSED" } });
+    expect((await act(host, "send", { text: "tunggu ya" })).ok).toBe(true);
+    await sleep(700); // lebih lama dari waktu memilih
+    expect(await act(host, "tick")).toMatchObject({ ok: false, error: { code: "NOT_DUE" } });
+
+    await comeBack(guest);
+    const resumed = await state();
+    expect(resumed).toMatchObject({ phase: "picking", paused: false, waitingForPlayersMs: null });
+    expect(resumed.remainingMs).toBeGreaterThan(300);
+    expect(resumed.remainingMs).toBeLessThan(600);
+    expect((await act(host, "pick", { value: 3 })).ok).toBe(true);
+  });
+
+  it("setelah jeda ada sisa waktu minimal", async () => {
+    const { guest, state, drop, comeBack } = await game({ pickMs: 1_000, resumeMinMs: 800 });
+    await sleep(700);
+    await drop(guest);
+    await comeBack(guest);
+    expect((await state()).remainingMs).toBeGreaterThan(600);
+  });
+
+  it("satu jeda per pemain: putus kedua kali waktu tetap berjalan, pemain lain masih punya jatah", async () => {
+    const { host, guest, state, drop, comeBack } = await game({ pickMs: 5_000 });
+    await drop(guest);
+    expect((await state()).paused).toBe(true);
+    const back = await comeBack(guest);
+
+    await drop(back);
+    const second = await state();
+    expect(second.paused).toBe(false);
+    expect(second.remainingMs).toBeGreaterThan(0);
+    expect(second.waitingForPlayersMs).toBeGreaterThan(4_000);
+    // Tanpa jeda, permainan tetap bisa dimainkan oleh yang tersisa.
+    expect((await act(host, "pick", { value: 3 })).ok).toBe(true);
+
+    const again = await comeBack(back);
+    host.disconnect();
+    await sleep(60);
+    expect((await ok<GameRoom>(again, "room:sync")).state.paused).toBe(true);
+  });
+
+  it("3 pemain: baru dijeda saat tinggal satu, dan satu yang kembali sudah cukup", async () => {
+    const { guests, state, drop, comeBack } = await game({ pickMs: 5_000 }, 2);
+    await drop(guests[0]!);
+    expect(await state()).toMatchObject({ paused: false, waitingForPlayersMs: null });
+    await drop(guests[1]!);
+    expect((await state()).paused).toBe(true);
+    await comeBack(guests[0]!);
+    expect(await state()).toMatchObject({ paused: false, waitingForPlayersMs: null });
+  });
+
+  it("lama jeda tidak dihitung ke kecepatan menjawab", async () => {
+    const { host, guest, state, drop, comeBack } = await game(
+      { pickMs: 5_000, revealMs: 5_000, answerMs: 5_000 },
+      1,
+      { category: "custom", customCategory: "apa saja" },
+    );
+    await act(host, "pick", { value: 3 });
+    await act(guest, "pick", { value: 4 });
+    await act(host, "changeLetter", { choice: "keep" });
+    await act(guest, "changeLetter", { choice: "keep" });
+    expect((await state()).phase).toBe("answering");
+
+    await drop(guest);
+    await sleep(600);
+    await comeBack(guest);
+    const letter = (await state()).reveal!.letter;
+    await act(host, "answer", { text: `${letter}abu` });
+    expect((await state()).answers[0]!.ms).toBeLessThan(450);
+  });
+});
+
 describe("abc-words: pemain putus koneksi di tengah permainan", () => {
   // Masa tunggu reconnect dibuat panjang: pemain yang putus tetap tercatat sebagai member.
   const env = { RECONNECT_GRACE_MS: "5000" };
@@ -846,7 +956,11 @@ describe("abc-words: voting dan skor", () => {
     (await state(socket)).answers.find((a) => a.userId === idOf(target))?.accepted;
 
   /** Semua memilih angka 1 lalu menjawab sesuai `words` (kosong = tidak menjawab); berhenti di voting. */
-  async function voting(words: string[], settings: Partial<AbcWordsSettings> = {}) {
+  async function voting(
+    words: string[],
+    settings: Partial<AbcWordsSettings> = {},
+    timing: Parameters<typeof createAbcWordsModule>[0] = {},
+  ) {
     const module = createAbcWordsModule({
       pickMs: 5000,
       revealMs: 1,
@@ -857,6 +971,7 @@ describe("abc-words: voting dan skor", () => {
       resultMs: 5,
       finishedMs: 5,
       abandonMs: 5000,
+      ...timing,
     });
     const { url } = await startServer({ RECONNECT_GRACE_MS: "5000" }, [module]);
     const sockets: Socket[] = [await connect(url, { name: "Pemain0" })];
@@ -1263,6 +1378,80 @@ describe("abc-words: voting dan skor", () => {
     (p1 as unknown as { disconnect(): void }).disconnect();
     await sleep(30);
     expect((await state(p0)).phase).toBe("finished");
+  });
+
+  it("mengakhiri sebelum ada ronde selesai: langsung ke ruang tunggu", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    const p0 = sockets[0]!;
+    await ok(p0, "room:action", { action: "end" }); // masih voting ronde 1
+    expect(await state(p0)).toMatchObject({ phase: "waiting", scores: {} });
+  });
+
+  it("host mengakhiri saat hasil ronde 1: sudah dihitung, jadi skor akhir tampil", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    const p0 = sockets[0]!;
+    await tick(p0); // hasil ronde 1
+    await ok(p0, "room:action", { action: "end" });
+    expect(await state(p0)).toMatchObject({ phase: "finished", endedReason: "Host mengakhiri permainan" });
+  });
+
+  it("host mengakhiri di ronde berikutnya: skor akhir, lalu ditutup ke ruang tunggu", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"]);
+    const [p0, p1] = sockets as [Socket, Socket];
+    await tick(p0); // hasil ronde 1
+    await tick(p0); // ronde 2
+    await ok(p0, "room:action", { action: "end" });
+    const final = await state(p1);
+    expect(final).toMatchObject({ phase: "finished", endedReason: "Host mengakhiri permainan" });
+    expect(Object.values(final.scores)).toEqual([1, 1, 1]);
+    expect(final.messages.at(-1)?.text).toBe("Host mengakhiri permainan");
+
+    await ok(p0, "room:action", { action: "end" });
+    expect(await state(p1)).toMatchObject({ phase: "waiting", scores: {}, departed: [] });
+  });
+
+  it("tersisa satu karena pemain keluar: skor akhir menyimpan nama dan skornya", async () => {
+    const { sockets } = await voting(["aa", "bb"]);
+    const [p0, p1] = sockets as [Socket, Socket];
+    await tick(p0); // hasil ronde 1
+    await ok(p1, "room:leave");
+    const final = await state(p0);
+    expect(final).toMatchObject({
+      phase: "finished",
+      endedReason: "Permainan berakhir karena pemain tidak cukup",
+      departed: [{ userId: idOf(p1), name: "Pemain1" }],
+    });
+    expect(final.scores[idOf(p1)]).toBe(1);
+  });
+
+  it("pemain putus sampai batas tunggu: skor akhir, jeda dibersihkan", async () => {
+    const { sockets } = await voting(["aa", "bb"], {}, { abandonMs: 50 });
+    const [p0, p1] = sockets as [Socket, Socket];
+    await tick(p0); // hasil ronde 1
+    (p1 as unknown as { disconnect(): void }).disconnect();
+    await sleep(30);
+    expect((await state(p0)).paused).toBe(true);
+    await sleep(40);
+    await ok(p0, "room:action", { action: "tick" });
+    expect(await state(p0)).toMatchObject({
+      phase: "finished",
+      paused: false,
+      waitingForPlayersMs: null,
+      endedReason: "Permainan berakhir karena pemain lain terputus",
+    });
+  });
+
+  it("pemain yang keluar saat permainan lanjut tetap ada di skor akhir, juga yang keluar di layar itu", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 1 });
+    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
+    await tick(p0); // hasil
+    await ok(p2, "room:leave");
+    await tick(p0); // skor akhir
+    await ok(p1, "room:leave");
+    const final = await state(p0);
+    expect(final).toMatchObject({ phase: "finished", endedReason: null });
+    expect(final.departed.map((p) => p.name)).toEqual(["Pemain2", "Pemain1"]);
+    expect(Object.values(final.scores)).toEqual([1, 1, 1]);
   });
 });
 

@@ -173,8 +173,20 @@ export interface AbcWordsState extends ChatState {
   phaseMs: number | null;
   /** Epoch ms permainan dihentikan kalau pemain online tetap kurang dari minimum. */
   abandonAt: number | null;
-  /** Alasan permainan terakhir berakhir; tampil di ruang tunggu. */
+  /**
+   * Terisi selama permainan dijeda menunggu pemain (lihat `watchOnlinePlayers`): sisa waktu fase dan
+   * kapan jeda dimulai. Selama dijeda `deadline` kosong.
+   */
+  pause: { remainingMs: number; startedAt: number } | null;
+  /** Pemain yang sudah memakai jatah jedanya (satu per pemain per permainan). */
+  pauseUsed: string[];
+  /**
+   * Alasan permainan terakhir berakhir; tampil di ruang tunggu, dan di skor akhir kalau permainan
+   * dihentikan sebelum ronde terakhir.
+   */
   endedReason: string | null;
+  /** Pemain yang keluar selama permainan; namanya disimpan supaya tetap ikut di skor akhir. */
+  departed: { userId: string; name: string }[];
   /** Rahasia selama fase picking; lihat `serializeState`. */
   picks: Record<string, number>;
   usedLetters: string[];
@@ -236,8 +248,10 @@ export interface AbcWordsTiming {
   revealMs: number;
   /** Lama huruf pengganti ditampilkan sebelum menjawab dimulai. */
   changedRevealMs: number;
-  /** Jeda sebelum game dihentikan saat pemain online kurang, supaya refresh tidak mematikan game. */
+  /** Lama permainan menunggu saat pemain online kurang, sebelum dihentikan. */
   abandonMs: number;
+  /** Sisa waktu minimal setelah jeda, supaya pemain yang baru kembali sempat bertindak. */
+  resumeMinMs: number;
   answerMs: number;
   /** Waktu untuk pemain terakhir yang belum menjawab. */
   lastPlayerMs: number;
@@ -263,7 +277,8 @@ const DEFAULT_TIMING: AbcWordsTiming = {
   pickMs: 10_000,
   revealMs: 10_000,
   changedRevealMs: 3_000,
-  abandonMs: 5_000,
+  abandonMs: 30_000,
+  resumeMinMs: 5_000,
   answerMs: 30_000,
   lastPlayerMs: 10_000,
   nearTieMs: 2_000,
@@ -381,6 +396,9 @@ function idleFields() {
     deadline: null,
     phaseMs: null,
     abandonAt: null,
+    pause: null as AbcWordsState["pause"],
+    pauseUsed: [] as string[],
+    departed: [] as AbcWordsState["departed"],
     usedLetters: [] as string[],
     scores: {} as Record<string, number>,
     rejectionsUsed: {} as Record<string, number>,
@@ -572,14 +590,31 @@ export function createAbcWordsModule(
   }
 
   function showFinalScores(ctx: Ctx): void {
+    // Permainannya sudah selesai: tidak ada yang perlu ditunggu atau dijeda.
+    ctx.room.state.abandonAt = null;
+    ctx.room.state.pause = null;
     ctx.room.state.phase = "finished";
     setDeadline(ctx, timing.finishedMs);
+  }
+
+  /**
+   * Permainan dihentikan sebelum ronde terakhir selesai (host mengakhiri, atau pemain kurang).
+   * Kalau sudah ada ronde yang selesai, skor akhir tetap ditampilkan, supaya hasilnya tidak bisa
+   * dihapus dengan keluar atau mengakhiri permainan; ronde yang belum selesai tidak dihitung.
+   * Kalau belum ada, langsung kembali ke ruang tunggu.
+   */
+  function stopGame(ctx: Ctx, reason: string): void {
+    const { state } = ctx.room;
+    if (state.phase !== "result" && state.round <= 1) return backToWaiting(ctx, reason);
+    state.endedReason = reason;
+    showFinalScores(ctx);
+    pushMessage(ctx, { userId: null, name: "system", text: reason });
   }
 
   /** Selesai kalau semua pemain aktif sudah menjawab; pemain terakhir dapat waktu sendiri. */
   function checkAnswering(ctx: Ctx): void {
     const { state } = ctx.room;
-    if (state.phase !== "answering") return;
+    if (state.phase !== "answering" || state.pause) return;
     const waitingFor = activePlayers(ctx.room).filter((m) => !state.answers.some((a) => a.userId === m.userId));
     if (waitingFor.length === 0) {
       finishAnswering(ctx);
@@ -619,7 +654,7 @@ export function createAbcWordsModule(
   function checkLetterVote(ctx: Ctx): void {
     const { state } = ctx.room;
     const reveal = state.reveal;
-    if (state.phase !== "reveal" || !reveal || reveal.changedFrom !== null) return;
+    if (state.phase !== "reveal" || state.pause || !reveal || reveal.changedFrom !== null) return;
     const active = activePlayers(ctx.room).map((m) => m.userId);
     if (active.length === 0) return;
     const votes = state.letterVotes.filter((id) => active.includes(id)).length;
@@ -646,30 +681,66 @@ export function createAbcWordsModule(
   /** Voting selesai lebih awal kalau semua penilai yang online sudah menekan "selesai". */
   function checkVoting(ctx: Ctx): void {
     const { state } = ctx.room;
-    if (state.phase !== "voting") return;
+    if (state.phase !== "voting" || state.pause) return;
     if (judgesOf(ctx.room).every((id) => state.votingDone.includes(id))) showResult(ctx);
   }
 
   /** Pemain yang putus atau AFK tidak ditunggu; server memilihkan angka untuk mereka. */
   function revealIfEveryonePicked(ctx: Ctx): void {
     const { room } = ctx;
-    if (room.state.phase !== "picking") return;
+    if (room.state.phase !== "picking" || room.state.pause) return;
     const active = activePlayers(room);
     if (active.length > 0 && active.every((m) => room.state.picks[m.userId] !== undefined)) revealLetter(ctx);
   }
 
   /**
-   * Member yang putus tetap tercatat di room selama masa tunggu reconnect (30 detik),
-   * jadi yang dihitung di sini adalah yang benar-benar online.
+   * Member yang putus tetap tercatat di room selama masa tunggu reconnect, jadi yang dihitung di sini
+   * adalah yang benar-benar online. Kalau kurang dari minimum, permainan menunggu `abandonMs`.
+   * Selama menunggu permainan dijeda hanya kalau semua yang baru putus (`dropped`) masih punya jatah
+   * jeda, satu per pemain per permainan: tanpa batas, orang bisa menutup aplikasi, mencari jawaban,
+   * lalu kembali dengan waktu utuh. Tanpa jeda, waktu fase tetap berjalan.
    */
-  function watchOnlinePlayers(ctx: Ctx): void {
+  function watchOnlinePlayers(ctx: Ctx, dropped: string[]): void {
     const { state, members } = ctx.room;
     if (state.phase === "waiting" || state.phase === "finished") {
       state.abandonAt = null;
       return;
     }
-    if (members.filter((m) => m.isConnected).length >= MIN_PLAYERS) state.abandonAt = null;
-    else state.abandonAt ??= ctx.now() + timing.abandonMs;
+    if (members.filter((m) => m.isConnected).length >= MIN_PLAYERS) {
+      state.abandonAt = null;
+      resumeGame(ctx);
+      return;
+    }
+    if (state.abandonAt !== null) return; // sudah menunggu
+    state.abandonAt = ctx.now() + timing.abandonMs;
+    if (dropped.length === 0 || dropped.some((id) => state.pauseUsed.includes(id))) return;
+    state.pauseUsed.push(...dropped);
+    pauseGame(ctx);
+  }
+
+  function pauseGame(ctx: Ctx): void {
+    const { state } = ctx.room;
+    if (state.deadline === null) return;
+    const now = ctx.now();
+    state.pause = { remainingMs: Math.max(state.deadline - now, 0), startedAt: now };
+    state.deadline = null;
+  }
+
+  /** Lanjutkan dengan sisa waktu semula; lama jeda tidak dihitung ke kecepatan menjawab. */
+  function resumeGame(ctx: Ctx): void {
+    const { state } = ctx.room;
+    const { pause } = state;
+    if (!pause) return;
+    const now = ctx.now();
+    state.pause = null;
+    if (state.answeringStartedAt !== null) state.answeringStartedAt += now - pause.startedAt;
+    // Batas bawah tidak melebihi panjang fasenya, supaya bar waktu tidak lewat dari penuh.
+    state.deadline = now + Math.max(pause.remainingMs, Math.min(timing.resumeMinMs, state.phaseMs ?? 0));
+  }
+
+  /** Selama dijeda tidak ada aksi permainan; chat tetap bisa. */
+  function failIfPaused(ctx: Ctx): void {
+    if (ctx.room.state.pause) ctx.fail("GAME_PAUSED", "Permainan dijeda, menunggu pemain tersambung lagi");
   }
 
   return defineRoomModule<AbcWordsState, AbcWordsSettings>({
@@ -685,7 +756,9 @@ export function createAbcWordsModule(
         picks,
         deadline,
         answers,
-        abandonAt: _abandonAt,
+        abandonAt,
+        pause,
+        pauseUsed: _pauseUsed,
         answeringStartedAt: _answeringStartedAt,
         lastCallUsed: _lastCallUsed,
         graceUsedBy: _graceUsedBy,
@@ -699,6 +772,9 @@ export function createAbcWordsModule(
         answers: answers.map(({ key: _key, ...answer }) => answer),
         // Sisa waktu, bukan jam server, supaya tidak terpengaruh jam perangkat pemain.
         remainingMs: deadline === null ? null : Math.max(deadline - Date.now(), 0),
+        paused: pause !== null,
+        // Terisi selama pemain online kurang: sisa waktu sebelum permainan dihentikan.
+        waitingForPlayersMs: abandonAt === null ? null : Math.max(abandonAt - Date.now(), 0),
         pickedBy: Object.keys(picks),
         myPick: viewerId === null ? null : (picks[viewerId] ?? null),
         rejectionsLeft: state.rejectionLimit - (viewerId === null ? 0 : (rejectionsUsed[viewerId] ?? 0)),
@@ -726,18 +802,22 @@ export function createAbcWordsModule(
       delete state.picks[member.userId];
       state.ready = state.ready.filter((id) => id !== member.userId);
       delete state.pingedAt[member.userId];
+      if (state.phase !== "waiting") state.departed.push({ userId: member.userId, name: member.name });
       if (state.phase !== "waiting" && state.phase !== "finished" && members.length < MIN_PLAYERS) {
-        backToWaiting(ctx, "Permainan berakhir karena pemain tidak cukup");
+        stopGame(ctx, "Permainan berakhir karena pemain tidak cukup");
         return;
       }
-      watchOnlinePlayers(ctx);
+      watchOnlinePlayers(
+        ctx,
+        members.filter((m) => !m.isConnected).map((m) => m.userId),
+      );
       revealIfEveryonePicked(ctx);
       checkAnswering(ctx);
       checkVoting(ctx);
     },
 
-    onMemberPresence(ctx) {
-      watchOnlinePlayers(ctx);
+    onMemberPresence(ctx, member) {
+      watchOnlinePlayers(ctx, member.isConnected ? [] : [member.userId]);
       revealIfEveryonePicked(ctx);
       checkLetterVote(ctx);
       checkAnswering(ctx);
@@ -790,6 +870,7 @@ export function createAbcWordsModule(
       pick: action({
         schema: z.object({ value: z.number().int().min(1).max(10) }),
         handler(ctx, { value }) {
+          failIfPaused(ctx);
           if (ctx.room.state.phase !== "picking") ctx.fail("WRONG_PHASE", "Waktu memilih angka sudah lewat");
           ctx.room.state.picks[ctx.sender!.userId] = value;
           ctx.room.state.idleRounds[ctx.sender!.userId] = 0; // kembali aktif
@@ -806,6 +887,7 @@ export function createAbcWordsModule(
           const sender = ctx.sender!;
           const now = ctx.now();
 
+          failIfPaused(ctx);
           if (state.phase !== "answering" || state.deadline === null || now >= state.deadline) {
             return ctx.fail("WRONG_PHASE", "Waktu menjawab sudah habis");
           }
@@ -886,6 +968,7 @@ export function createAbcWordsModule(
           const { state } = ctx.room;
           const sender = ctx.sender!;
 
+          failIfPaused(ctx);
           if (state.phase !== "voting") ctx.fail("WRONG_PHASE", "Waktu voting sudah habis");
           if (answerUserId === sender.userId) ctx.fail("OWN_ANSWER", "Jawaban sendiri tidak bisa ditolak");
           const answer = state.answers.find((a) => a.userId === answerUserId);
@@ -916,6 +999,7 @@ export function createAbcWordsModule(
         handler(ctx, { choice }) {
           const { state } = ctx.room;
           const userId = ctx.sender!.userId;
+          failIfPaused(ctx);
           if (state.phase !== "reveal" || !state.reveal) ctx.fail("WRONG_PHASE", "Huruf hanya bisa diganti saat baru keluar");
           if (state.reveal!.changedFrom !== null) ctx.fail("ALREADY_CHANGED", "Huruf ronde ini sudah diganti sekali");
 
@@ -933,6 +1017,7 @@ export function createAbcWordsModule(
         handler(ctx, { done }) {
           const { state } = ctx.room;
           const userId = ctx.sender!.userId;
+          failIfPaused(ctx);
           if (state.phase !== "voting") ctx.fail("WRONG_PHASE", "Waktu voting sudah habis");
           if (!judgesOf(ctx.room).includes(userId)) ctx.fail("NOTHING_TO_JUDGE", "Tidak ada jawaban untuk kamu nilai");
 
@@ -949,7 +1034,7 @@ export function createAbcWordsModule(
           const { state } = ctx.room;
           const now = ctx.now();
           if (state.abandonAt !== null && now >= state.abandonAt) {
-            backToWaiting(ctx, "Permainan berakhir karena pemain lain terputus");
+            stopGame(ctx, "Permainan berakhir karena pemain lain terputus");
             return;
           }
           if (state.deadline === null || now < state.deadline) ctx.fail("NOT_DUE", "Waktu fase ini belum habis");
@@ -1004,8 +1089,11 @@ export function createAbcWordsModule(
       end: action({
         hostOnly: true,
         handler(ctx) {
-          if (ctx.room.state.phase === "waiting") ctx.fail("GAME_NOT_STARTED", "Permainan belum dimulai");
-          backToWaiting(ctx, ctx.room.state.phase === "finished" ? "Permainan selesai" : "Host mengakhiri permainan");
+          const { phase } = ctx.room.state;
+          if (phase === "waiting") ctx.fail("GAME_NOT_STARTED", "Permainan belum dimulai");
+          // Di layar skor akhir, aksi ini menutupnya.
+          if (phase === "finished") backToWaiting(ctx, "Permainan selesai");
+          else stopGame(ctx, "Host mengakhiri permainan");
         },
       }),
 
