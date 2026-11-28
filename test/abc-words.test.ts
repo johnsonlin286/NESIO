@@ -1040,9 +1040,7 @@ describe("abc-words: voting dan skor", () => {
     expect(await verdict(p0, p0)).toBe(false);
     const now = await state(p0);
     expect(now.answers.find((a) => a.userId === idOf(p0))).toMatchObject({ judgedByOne: true, points: 0 });
-    // Aturan "menolak sendirian" tidak berlaku: setiap tolakan memang sendirian.
-    expect(now.penalties.filter((p) => p.reason === "lone-rejection")).toEqual([]);
-    expect(now.loneRejections).toEqual({});
+    expect(now.penalties).toEqual([]);
   });
 
   it("main berdua: jawaban di luar daftar lolos kecuali ditolak lawan, gugurnya 0 poin, jatah tidak kembali", async () => {
@@ -1106,7 +1104,7 @@ describe("abc-words: voting dan skor", () => {
     let now = await state(p0);
     expect(now.scores).toEqual({ [idOf(p0)]: 2, [idOf(p1)]: 2, [idOf(p2)]: 0 });
     expect(now.penalties).toEqual([
-      { userId: idOf(p2), name: "Pemain2", reason: "no-answer", answerText: null, strike: null, warning: false, points: -1 },
+      { userId: idOf(p2), name: "Pemain2", reason: "no-answer", points: -1 },
     ]);
     await tick(p0);
 
@@ -1129,64 +1127,20 @@ describe("abc-words: voting dan skor", () => {
     expect(now.penalties.map((p) => p.reason)).toEqual(["no-answer", "no-answer", "no-answer"]);
   });
 
-  it("menolak sendirian: pertama diam, kedua peringatan, ketiga kali -1", async () => {
-    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 4 });
-    const [p0, p1, p2] = sockets as [Socket, Socket, Socket];
-    const loneOf = async () => (await state(p0)).penalties.filter((p) => p.reason === "lone-rejection");
-
-    // Ronde 1-2: p1 menolak p0 sendirian, p0 tetap lolos.
-    // Pertama: diam-diam. Kedua: peringatan tanpa potongan.
-    for (const strike of [1, 2]) {
-      if (strike > 1) await playRound(sockets, ["aa", "bb", "cc"]);
-      await reject(p1, p0);
+  it("menolak sendirian tidak dihukum, tapi jatah tolaknya tidak kembali", async () => {
+    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 3 });
+    const [p0, p1] = sockets as [Socket, Socket];
+    for (let round = 1; round <= 3; round++) {
+      if (round > 1) await playRound(sockets, ["aa", "bb", "cc"]);
+      await reject(p1, p0); // sendirian, p0 tetap lolos
       await tick(p0); // hasil
       expect(await verdict(p0, p0)).toBe(true);
-      expect(await loneOf()).toEqual(
-        strike === 1
-          ? []
-          : [
-              {
-                userId: idOf(p1),
-                name: "Pemain1",
-                reason: "lone-rejection",
-                answerText: expect.any(String),
-                strike,
-                warning: true,
-                points: 0,
-              },
-            ],
-      );
-      expect((await state(p2)).loneRejections).toEqual({ [idOf(p1)]: strike });
+      const now = await state(p0);
+      expect(now.penalties).toEqual([]);
+      expect(now.scores[idOf(p1)]).toBe(round); // +1 per ronde, tanpa potongan
+      expect((await state(p1)).rejectionsLeft).toBe(3 - round);
       await tick(p0);
     }
-    expect((await state(p0)).scores[idOf(p1)]).toBe(2);
-
-    // Ronde 3: ketiga kali, -1.
-    await playRound(sockets, ["aa", "bb", "cc"]);
-    await reject(p1, p0);
-    await tick(p0);
-    expect(await loneOf()).toMatchObject([{ userId: idOf(p1), strike: 3, warning: false, points: -1 }]);
-    expect((await state(p0)).scores[idOf(p1)]).toBe(2); // 2 + 1 - 1
-    await tick(p0);
-
-    // Tolakan yang didukung pemain lain tidak dihitung sebagai tolakan sendirian.
-    // (Jatah tolak p1 sudah habis: tolakan sendirian tidak dikembalikan.)
-    await playRound(sockets, ["aa", "bb", "cc"]);
-    await reject(p0, p1);
-    await reject(p2, p1);
-    await tick(p0);
-    expect(await loneOf()).toEqual([]);
-    expect((await state(p0)).loneRejections[idOf(p1)]).toBe(3);
-  });
-
-  it("permainan baru: hitungan tolakan sendirian kembali 0", async () => {
-    const { sockets } = await voting(["aa", "bb", "cc"], { maxRounds: 1 });
-    const [p0, p1] = sockets as [Socket, Socket];
-    await reject(p1, p0);
-    await tick(p0); // hasil
-    await tick(p0); // skor akhir
-    await tick(p0); // ruang tunggu
-    expect((await state(p0)).loneRejections).toEqual({});
   });
 
   it("menolak sendirian tapi kalah suara bersama pemain lain: tidak ada hukuman", async () => {
@@ -1728,10 +1682,11 @@ describe("abc-words: voting ganti huruf", () => {
     await vote(b, "keep"); // langsung ke fase menjawab
     const act = (s: Socket, action: string, payload?: unknown) => ok(s, "room:action", { action, payload });
     await sleep(40);
-    await act(a, "answer", { text: "Cicak" });
+    // Kata di luar semua daftar (kategori bawaan Negara), supaya semuanya di-voting.
+    await act(a, "answer", { text: "Cemara" });
     await sleep(40);
     await act(b, "answer", { text: "Cumi" });
-    await act(c, "answer", { text: "Cacing" });
+    await act(c, "answer", { text: "Cermin" });
 
     const voting = await state(a);
     expect(voting.phase).toBe("voting");
@@ -1913,6 +1868,13 @@ describe("abc-words: jawaban terverifikasi", () => {
     ]);
   });
 
+  it("kota: kota luar negeri yang namanya kata sehari-hari tidak terverifikasi", async () => {
+    const [a] = await answering({ category: "kota" });
+    await act(a, "answer", { text: "Cupang" }); // kota di Filipina, tapi juga nama ikan
+    // Bukan kota di daftar lagi, dan ada di daftar Hewan: gugur otomatis.
+    expect((await state(a)).answers.map((x) => [x.text, x.verified, x.otherCategory])).toEqual([["Cupang", false, "hewan"]]);
+  });
+
   it("hewan: nama Indonesia (juga kata ulang tanpa tanda hubung) terverifikasi, bukan nama hewan tidak", async () => {
     const [a, b, c] = await answering({ category: "hewan" });
     await act(a, "answer", { text: "Cicak" });
@@ -1972,6 +1934,92 @@ describe("abc-words: jawaban terverifikasi", () => {
       ["Cendol", true],
       ["Coklat", true],
       ["Cireng Isi", false],
+    ]);
+  });
+
+  it("jawaban dari daftar kategori lain gugur otomatis, tanpa voting dan tanpa bisa ditolak", async () => {
+    const [a, b, c] = await answering({ category: "hewan" });
+    await act(a, "answer", { text: "Cina" }); // daftar Negara
+    await act(b, "answer", { text: "Cabai" }); // daftar Buah & Sayur
+    await act(c, "answer", { text: "Cumi" }); // tidak ada di daftar mana pun: tetap di-voting
+
+    const voting = await state(a);
+    expect(voting.phase).toBe("voting");
+    expect(voting.answers.map((x) => [x.text, x.verified, x.otherCategory])).toEqual([
+      ["Cina", false, "negara"],
+      ["Cabai", false, "buah-sayur"],
+      ["Cumi", false, null],
+    ]);
+    const cina = { answerUserId: voting.answers[0]!.userId, rejected: true, reason: "off-category" };
+    expect(await call(b, "room:action", { action: "reject", payload: cina })).toMatchObject({
+      ok: false,
+      error: { code: "AUTO_FAILED" },
+    });
+    // Hanya jawaban C yang dinilai, jadi C tidak punya apa-apa untuk dinilai.
+    expect(await call(c, "room:action", { action: "doneVoting", payload: { done: true } })).toMatchObject({
+      ok: false,
+      error: { code: "NOTHING_TO_JUDGE" },
+    });
+    await act(a, "doneVoting", { done: true });
+    await act(b, "doneVoting", { done: true });
+
+    const result = await state(a);
+    expect(result.phase).toBe("result");
+    expect(result.answers.map((x) => [x.text, x.accepted])).toEqual([
+      ["Cina", false],
+      ["Cabai", false],
+      ["Cumi", true],
+    ]);
+    // Gugur -1, tapi skor tidak turun di bawah 0.
+    expect(result.answers.map((x) => x.points)).toEqual([0, 0, 1]);
+  });
+
+  it("semua jawaban terverifikasi atau gugur otomatis: voting dilewati", async () => {
+    const [a, b, c] = await answering({ category: "negara" });
+    await act(a, "answer", { text: "Cina" });
+    await act(b, "answer", { text: "Cicak" }); // daftar Hewan
+    await act(c, "answer", { text: "Coklat" }); // daftar Makanan & Minuman
+    const now = await state(a);
+    expect(now.phase).toBe("result");
+    expect(now.answers.map((x) => [x.text, x.accepted, x.otherCategory])).toEqual([
+      ["Cina", true, null],
+      ["Cicak", false, "hewan"],
+      ["Coklat", false, "makanan-minuman"],
+    ]);
+  });
+
+  it("nama tempat di kategori lain tetap di-voting, tapi tolakannya selalu dikembalikan", async () => {
+    const [a, b, c] = await answering({ category: "hewan" });
+    await act(a, "answer", { text: "Cirebon" }); // daftar Kota: bukti lemah
+    await act(b, "answer", { text: "Cumi" });
+    await act(c, "answer", { text: "Cicak" });
+    const voting = await state(a);
+    expect(voting.answers.map((x) => [x.text, x.otherCategory, x.placeName])).toEqual([
+      ["Cirebon", null, true],
+      ["Cumi", null, false],
+      ["Cicak", null, false],
+    ]);
+    const answerOf = (text: string) => voting.answers.find((x) => x.text === text)!.userId;
+    // C menolak keduanya sendirian: keduanya tetap lolos.
+    await act(c, "reject", { answerUserId: answerOf("Cirebon"), rejected: true, reason: "off-category" });
+    await act(c, "reject", { answerUserId: answerOf("Cumi"), rejected: true, reason: "not-a-word" });
+    expect((await state(c)).rejectionsLeft).toBe(1);
+    for (const s of [a, b, c]) await act(s, "doneVoting", { done: true });
+
+    const result = await state(c);
+    expect(result.phase).toBe("result");
+    expect(result.answers.every((x) => x.accepted)).toBe(true);
+    // Jatah untuk "Cirebon" kembali, untuk "Cumi" tidak.
+    expect(result.rejectionsLeft).toBe(2);
+  });
+
+  it("kategori Lainnya tidak dicek dengan daftar mana pun", async () => {
+    const [a, b] = await answering({ category: "custom", customCategory: "Benda" });
+    await act(a, "answer", { text: "Cina" });
+    await act(b, "answer", { text: "Cirebon" });
+    expect((await state(a)).answers.map((x) => [x.verified, x.otherCategory, x.placeName])).toEqual([
+      [false, null, false],
+      [false, null, false],
     ]);
   });
 

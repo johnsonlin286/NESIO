@@ -6,7 +6,7 @@ import { cleanText } from "../../lib/text.js";
 import { chatSendSchema, pushMessage, type ChatState } from "../chat/index.js";
 import { createProfanityChecker } from "../chat/profanity.js";
 import { DEFAULT_CHAT_SPAM_RULES, createChatSpamGuard, type ChatSpamRules } from "../chat/spam-guard.js";
-import { isVerifiedAnswer, sameAnswerKey } from "./words/index.js";
+import { isPlaceName, isVerifiedAnswer, otherCategoryOf, sameAnswerKey } from "./words/index.js";
 
 /**
  * Game ABC Lima Dasar: semua pemain menunjukkan angka 1–10, jumlahnya menjadi huruf,
@@ -110,6 +110,13 @@ export interface Answer {
   ms: number;
   /** Ada di daftar jawaban kategori ini (lihat ./words): langsung lolos, tidak bisa ditolak. */
   verified: boolean;
+  /**
+   * Tidak ada di daftar kategori ini tapi ada di daftar kategori lain (id kategorinya, mis. "negara"):
+   * gugur otomatis tanpa voting dan tidak bisa ditolak. `null` kalau bukan.
+   */
+  otherCategory: string | null;
+  /** Nama tempat (daftar Kota) di kategori lain: tetap dinilai, tapi tolakannya selalu dikembalikan. */
+  placeName: boolean;
   /** Suara terbuka: siapa saja yang menolak jawaban ini, dan alasannya. */
   rejectedBy: { userId: string; name: string; reason: RejectReason }[];
   /** Hasil voting; `null` sampai fase voting selesai. */
@@ -137,28 +144,17 @@ export const POINTS = {
    */
   rejectedByOne: 0,
   noAnswer: -1,
-  /** Menolak jawaban yang lolos tanpa didukung pemain lain, setelah peringatan habis. */
-  loneRejection: -1,
 } as const;
-
-/**
- * Menolak sendirian (game 3 pemain atau lebih), dihitung per permainan:
- * yang pertama diam-diam (tanpa catatan apa pun), yang kedua peringatan,
- * mulai yang ketiga dianggap sengaja dan dikenai `POINTS.loneRejection`.
- */
-export const LONE_REJECTION_WARNINGS = 2;
 
 /** Pengurangan poin di luar jawaban sendiri, ditampilkan di hasil ronde. */
 export interface Penalty {
   userId: string;
   name: string;
-  reason: "no-answer" | "lone-rejection";
-  /** Tolakan sendirian ke berapa dalam permainan ini; `null` untuk "no-answer". */
-  strike: number | null;
-  /** `true` kalau baru peringatan (kartu kuning), tanpa potongan poin. */
-  warning: boolean;
-  /** Jawaban yang ditolak sendirian; `null` untuk "no-answer". */
-  answerText: string | null;
+  /**
+   * Menolak sendirian tidak lagi dihukum (pemilik, 2026-11-28: penilai jujur yang kalah suara malah
+   * kehilangan poin); batasnya cukup jatah tolak.
+   */
+  reason: "no-answer";
   /** Perubahan skor yang benar-benar terjadi (0 kalau skor sudah 0). */
   points: number;
 }
@@ -211,8 +207,6 @@ export interface AbcWordsState extends ChatState {
   letterVotes: string[];
   /** Pemain yang memilih huruf ini tetap; fase reveal selesai lebih awal kalau penggantian sudah mustahil. */
   letterKeeps: string[];
-  /** Jumlah tolakan sendirian per pemain dalam satu permainan; terlihat semua pemain. */
-  loneRejections: Record<string, number>;
   /** Ronde berturut-turut tanpa memilih angka dan tanpa menjawab; lihat `AFK_ROUNDS`. */
   idleRounds: Record<string, number>;
   /**
@@ -376,9 +370,9 @@ function activePlayers(room: Room<AbcWordsState, AbcWordsSettings>) {
   return room.members.filter((m) => m.isConnected && !isAfk(room.state, m.userId));
 }
 
-/** Jawaban terverifikasi tidak dinilai; hanya sisanya yang masuk voting. */
+/** Jawaban terverifikasi dan yang gugur otomatis (kategori lain) tidak dinilai; hanya sisanya yang masuk voting. */
 function answersToJudge(room: Room<AbcWordsState, AbcWordsSettings>) {
-  return room.state.answers.filter((a) => !a.verified);
+  return room.state.answers.filter((a) => !a.verified && a.otherCategory === null);
 }
 
 /** Pemain aktif yang punya jawaban orang lain (yang belum terverifikasi) untuk dinilai. */
@@ -412,7 +406,6 @@ function idleFields() {
     scores: {} as Record<string, number>,
     rejectionsUsed: {} as Record<string, number>,
     rejectionLimit: MAX_REJECTIONS,
-    loneRejections: {} as Record<string, number>,
     idleRounds: {} as Record<string, number>,
     speed: {} as Record<string, AnswerSpeed>,
     ready: [] as string[],
@@ -513,10 +506,11 @@ export function createAbcWordsModule(
   /**
    * Jawaban gugur kalau lebih dari separuh pemain lain yang online menolaknya, dan minimal 2 orang:
    * selama ada pemain yang putus (masa tunggu reconnect) satu orang tetap tidak bisa menggugurkan sendirian.
-   * Poin (lihat `POINTS`): lolos +1, gugur -1 (0 kalau penilainya hanya satu), tidak menjawab -1, menolak sendirian jawaban yang
-   * tetap lolos -1 setelah dua peringatan (hanya kalau ada minimal 2 penilai online). Skor tidak turun di bawah 0.
+   * Jawaban dari daftar kategori lain gugur otomatis (-1) tanpa voting.
+   * Poin (lihat `POINTS`): lolos +1, gugur -1 (0 kalau penilainya hanya satu), tidak menjawab -1.
+   * Menolak sendirian tidak dihukum. Skor tidak turun di bawah 0.
    * Penolak jawaban yang gugur mendapat jatah tolaknya kembali kalau ada pemain lain yang ikut menolak;
-   * penolak jawaban yang lolos tidak.
+   * penolak jawaban yang lolos tidak, kecuali jawabannya nama tempat di kategori lain (`placeName`).
    */
   function showResult(ctx: Ctx): void {
     const { state, members } = ctx.room;
@@ -533,10 +527,13 @@ export function createAbcWordsModule(
       const voters = online.filter((id) => id !== answer.userId);
       const counted = answer.rejectedBy.filter((r) => voters.includes(r.userId));
       // Penilainya hanya satu: tolakannya menentukan, tapi gugurnya tanpa pengurangan poin.
-      answer.judgedByOne = !answer.verified && voters.length === 1;
-      answer.accepted = answer.judgedByOne
-        ? counted.length === 0
-        : answer.verified || counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
+      const autoFailed = answer.otherCategory !== null;
+      answer.judgedByOne = !answer.verified && !autoFailed && voters.length === 1;
+      answer.accepted = autoFailed
+        ? false
+        : answer.judgedByOne
+          ? counted.length === 0
+          : answer.verified || counted.length < MIN_REJECTIONS_TO_FAIL || counted.length * 2 <= voters.length;
       const rejectedPoints = answer.judgedByOne ? POINTS.rejectedByOne : POINTS.rejected;
       answer.points = addScore(answer.userId, answer.accepted ? POINTS.accepted : rejectedPoints);
       if (answer.accepted) {
@@ -545,27 +542,11 @@ export function createAbcWordsModule(
         speed.count += 1;
       }
 
-      if (!answer.accepted && counted.length >= 2) {
+      // Jatah kembali kalau tolakannya didukung, atau kalau jawabannya nama tempat (menolaknya wajar).
+      const refund = (!answer.accepted && counted.length >= 2) || (answer.accepted && answer.placeName);
+      if (refund) {
         for (const { userId } of answer.rejectedBy) {
           state.rejectionsUsed[userId] = Math.max((state.rejectionsUsed[userId] ?? 0) - 1, 0);
-        }
-      }
-      const lone = counted[0];
-      if (answer.accepted && counted.length === 1 && lone && voters.length >= 2) {
-        const strike = (state.loneRejections[lone.userId] ?? 0) + 1;
-        state.loneRejections[lone.userId] = strike;
-        const warning = strike <= LONE_REJECTION_WARNINGS;
-        // Kesalahan pertama tidak diumumkan.
-        if (strike > 1) {
-          state.penalties.push({
-            userId: lone.userId,
-            name: lone.name,
-            reason: "lone-rejection",
-            answerText: answer.text,
-            strike,
-            warning,
-            points: warning ? 0 : addScore(lone.userId, POINTS.loneRejection),
-          });
         }
       }
     }
@@ -584,9 +565,6 @@ export function createAbcWordsModule(
         userId: member.userId,
         name: member.name,
         reason: "no-answer",
-        answerText: null,
-        strike: null,
-        warning: false,
         points: addScore(member.userId, POINTS.noAnswer),
       });
     }
@@ -928,6 +906,7 @@ export function createAbcWordsModule(
 
           const { category } = ctx.room.settings;
           const verified = isVerifiedAnswer(category, key);
+          const otherCategory = otherCategoryOf(category, key);
           // Jawaban di daftar resmi selalu sah; sisanya tidak boleh berisi kata kasar.
           if (!verified && answerProfanity.isProfane(cleaned)) {
             const pause = recordRejectedAnswer(ctx, sender.userId);
@@ -952,6 +931,8 @@ export function createAbcWordsModule(
             at: now,
             ms: now - state.answeringStartedAt!,
             verified,
+            otherCategory,
+            placeName: otherCategory === null && isPlaceName(category, key),
             rejectedBy: [],
             judgedByOne: false,
             accepted: null,
@@ -983,6 +964,7 @@ export function createAbcWordsModule(
           const answer = state.answers.find((a) => a.userId === answerUserId);
           if (!answer) return ctx.fail("ANSWER_NOT_FOUND", "Jawaban tidak ditemukan");
           if (answer.verified) ctx.fail("VERIFIED_ANSWER", "Jawaban ini sudah terverifikasi, tidak bisa ditolak");
+          if (answer.otherCategory !== null) ctx.fail("AUTO_FAILED", "Jawaban ini sudah gugur otomatis");
 
           const index = answer.rejectedBy.findIndex((r) => r.userId === sender.userId);
           const used = state.rejectionsUsed[sender.userId] ?? 0;

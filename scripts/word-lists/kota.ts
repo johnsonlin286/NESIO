@@ -59,6 +59,27 @@ const ALIASES = [
   "Ujung Pandang",
 ];
 
+/**
+ * Kota luar negeri yang namanya kata sehari-hari (hewan, buah): tidak masuk daftar, supaya "Kuda" atau
+ * "Singa" tidak terverifikasi sebagai kota di kategori Kota (pemilik, 2026-11-28). Tempat di Indonesia
+ * (Kupang, Landak, Pare) tetap ada.
+ */
+const COMMON_WORDS = new Set([
+  "bayan",
+  "buni",
+  "cupang",
+  "dara",
+  "kuda",
+  "kutu",
+  "mol",
+  "pari",
+  "plum",
+  "puma",
+  "sentul",
+  "singa",
+  "talas",
+]);
+
 const DIRECTIONS: Record<string, string> = {
   North: "Utara",
   South: "Selatan",
@@ -91,7 +112,7 @@ for (const line of readFileSync(resolve(dir, "cities15000.txt"), "utf8").split("
   // "New York City", "Ho Chi Minh City": also without "City".
   const labels = [name!, asciiname!].flatMap((l) => (/ City$/.test(l) ? [l, l.replace(/ City$/, "")] : [l]));
   for (const label of labels) {
-    const labelKeys = toKeys(label).filter((k) => !excluded.has(k));
+    const labelKeys = toKeys(label).filter((k) => !excluded.has(k) && !(country !== "ID" && COMMON_WORDS.has(k)));
     for (const key of country === "ID" ? withJoined(labelKeys) : labelKeys) keys.add(key);
   }
 }
