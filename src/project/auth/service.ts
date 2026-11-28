@@ -23,6 +23,16 @@ export interface AuthServiceOptions {
 type Tx = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 /**
+ * Menghapus akun beserta semua refresh token-nya (cascade). Dipakai tombol "Hapus Akun" di aplikasi
+ * dan skrip admin untuk permintaan lewat email. Mengembalikan true bila ada akun yang terhapus.
+ */
+export async function deleteAccount(db: Database, userId: string): Promise<boolean> {
+  if (!UUID_PATTERN.test(userId)) return false;
+  const deleted = await db.delete(users).where(eq(users.id, userId)).returning({ id: users.id });
+  return deleted.length > 0;
+}
+
+/**
  * Login aplikasi Android: Google ID token ditukar dengan sesi milik kita sendiri
  * (access token JWT pendek + refresh token yang dirotasi).
  */
@@ -110,8 +120,7 @@ export class AuthService {
 
   /** Hapus akun beserta semua sesinya (cascade). Wajib tersedia menurut kebijakan Play Store. */
   async deleteAccount(userId: string): Promise<void> {
-    if (!UUID_PATTERN.test(userId)) return;
-    await this.db.delete(users).where(eq(users.id, userId));
+    await deleteAccount(this.db, userId);
   }
 
   async getUser(userId: string): Promise<AuthUser | null> {
