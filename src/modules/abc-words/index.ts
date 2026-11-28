@@ -287,7 +287,7 @@ const DEFAULT_TIMING: AbcWordsTiming = {
   votingMs: 20_000,
   retryWindowMs: 5_000,
   retryCooldownMs: 3_000,
-  resultMs: 5_000,
+  resultMs: 8_000,
   finishedMs: 30_000,
   pingCooldownMs: PING_COOLDOWN_MS,
 };

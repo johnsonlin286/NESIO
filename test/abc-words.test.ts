@@ -964,8 +964,9 @@ describe("abc-words: voting dan skor", () => {
     const module = createAbcWordsModule({
       pickMs: 5000,
       revealMs: 1,
-      answerMs: 30,
-      lastPlayerMs: 30,
+      // Long enough that every answer lands on a busy machine (30 ms made the tests flaky).
+      answerMs: 150,
+      lastPlayerMs: 150,
       minAnswerMs: 0,
       votingMs: 5,
       resultMs: 5,
@@ -995,7 +996,7 @@ describe("abc-words: voting dan skor", () => {
       if (words[i]) await answer(sockets[i]!, `${letter}${words[i]}`);
     }
     const now = await state(sockets[0]!);
-    if (now.phase === "answering") await sleep(40);
+    if (now.phase === "answering") await sleep(160);
     if ((await state(sockets[0]!)).phase === "answering") await tick(sockets[0]!);
   }
 
